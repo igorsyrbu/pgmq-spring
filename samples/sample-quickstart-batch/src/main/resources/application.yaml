@@ -1,0 +1,27 @@
+spring:
+  application:
+    name: pgmq-quickstart-batch-sample
+  datasource:
+    url: jdbc:postgresql://localhost:5432/postgres
+    username: postgres
+    password: postgres
+  sql:
+    init:
+      mode: always
+
+# Everything pgmq-spring needs: point it at a database and name the queues.
+pgmq:
+  queues:
+    - name: readings
+    - name: readings_dlq
+  health:
+    queues:
+      - readings
+  metrics:
+    queues:
+      - readings
+
+
+logging:
+  level:
+    io.github.pgmqspring: INFO

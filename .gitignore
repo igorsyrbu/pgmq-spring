@@ -1,0 +1,33 @@
+# Gradle caches and generated build output (including build-logic and samples)
+.gradle/
+build/
+out/
+
+# IntelliJ IDEA and other local editor files
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+*.swp
+*.swo
+*~
+
+# Operating system metadata
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini
+
+# Local environment files; keep shareable examples
+.env
+.env.*
+!.env.example
+!.env.template
+.claude/settings.local.json
+
+# Runtime logs and JVM diagnostics
+*.log
+*.hprof
+hs_err_pid*
+replay_pid*

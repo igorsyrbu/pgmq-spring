@@ -1,0 +1,21 @@
+plugins {
+    id 'pgmq.sample-conventions'
+}
+
+description = 'Minimal sample: batch sending and batch consumption'
+
+application {
+    mainClass = 'io.github.pgmqspring.samples.batch.BatchQuickstartApplication'
+}
+
+dependencies {
+    // The starter is the only pgmq dependency an application needs.
+    implementation project(':pgmq-spring-boot-starter')
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
+    implementation 'org.postgresql:postgresql'
+
+    testImplementation 'org.testcontainers:testcontainers-postgresql'
+    testImplementation 'org.testcontainers:testcontainers-junit-jupiter'
+    testImplementation 'org.awaitility:awaitility'
+    testImplementation testFixtures(project(':pgmq-core'))
+}

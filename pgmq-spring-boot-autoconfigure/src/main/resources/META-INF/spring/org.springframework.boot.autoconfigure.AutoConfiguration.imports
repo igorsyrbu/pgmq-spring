@@ -1,0 +1,3 @@
+io.github.pgmqspring.autoconfigure.PgmqAutoConfiguration
+io.github.pgmqspring.autoconfigure.PgmqHealthAutoConfiguration
+io.github.pgmqspring.autoconfigure.PgmqMetricsAutoConfiguration

@@ -1,0 +1,21 @@
+plugins {
+    id 'pgmq.java-conventions'
+    id 'application'
+}
+
+def springBootVersion = providers.gradleProperty('springBootVersion').get()
+
+dependencies {
+    implementation platform("org.springframework.boot:spring-boot-dependencies:$springBootVersion")
+    compileOnly 'org.jspecify:jspecify'
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+// Samples are demonstrations, not artifacts: nothing here is published, and the Spring Boot
+// Gradle plugin is deliberately not applied so the build has one source of truth for the Boot
+// version (gradle.properties) rather than also pinning a plugin version.
+tasks.named('run', JavaExec) {
+    systemProperty 'spring.profiles.active',
+        providers.gradleProperty('sampleProfile').getOrElse('default')
+}

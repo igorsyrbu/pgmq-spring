@@ -1,0 +1,77 @@
+plugins {
+    id 'pgmq.java-conventions'
+    id 'maven-publish'
+}
+
+def springBootVersion = providers.gradleProperty('springBootVersion').get()
+// Where the source lives; used for the POM's url, scm and issue links.
+def repositoryUrl = providers.gradleProperty('repositoryUrl').get()
+
+java {
+    withSourcesJar()
+    withJavadocJar()
+}
+
+// Boot's BOM governs every version this module resolves - main, test, test fixtures and annotation
+// processing - but is not part of what it publishes. Declared on `api`, it would be published as
+// an imported BOM in the POM and as a platform in the Gradle metadata, pulling Boot's whole set
+// of version constraints into every consumer, including plain pgmq-core users without Boot. The
+// published dependencies carry the resolved versions instead (see versionMapping below).
+// The Boot *plugin* is deliberately not applied: a library must not produce a bootJar.
+configurations {
+    springBootBom {
+        canBeConsumed = false
+        canBeResolved = false
+    }
+}
+configurations.matching { it.name.endsWith('Classpath') || it.name.endsWith('AnnotationProcessor') || it.name == 'annotationProcessor' }
+        .configureEach { extendsFrom configurations.springBootBom }
+
+dependencies {
+    springBootBom platform("org.springframework.boot:spring-boot-dependencies:$springBootVersion")
+    compileOnly 'org.jspecify:jspecify'
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    // Gradle needs the launcher on the test runtime classpath to start JUnit Platform.
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+publishing {
+    publications {
+        maven(MavenPublication) {
+            from components.java
+            // Publish the versions the build actually resolved, since the BOM itself is not published.
+            versionMapping {
+                usage('java-api') { fromResolutionOf('runtimeClasspath') }
+                usage('java-runtime') { fromResolutionResult() }
+            }
+            pom {
+                name = provider { project.name }
+                description = provider { project.description ?: project.name }
+                url = repositoryUrl
+                inceptionYear = '2026'
+                licenses {
+                    license {
+                        name = 'Apache License, Version 2.0'
+                        url = 'https://www.apache.org/licenses/LICENSE-2.0.txt'
+                        distribution = 'repo'
+                    }
+                }
+                developers {
+                    developer {
+                        id = 'igorsyrbu'
+                        name = 'Igor Syrbu'
+                        url = 'https://github.com/igorsyrbu'
+                    }
+                }
+                scm {
+                    connection = "scm:git:${repositoryUrl}.git"
+                    url = repositoryUrl
+                }
+                issueManagement {
+                    system = 'GitHub Issues'
+                    url = "$repositoryUrl/issues"
+                }
+            }
+        }
+    }
+}

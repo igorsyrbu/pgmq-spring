@@ -1,0 +1,38 @@
+plugins {
+    id 'pgmq.library-conventions'
+}
+
+description = 'Spring Boot auto-configuration for PGMQ'
+
+dependencies {
+    api project(':pgmq-core')
+
+    // Boot 4 split auto-configuration out of spring-boot-autoconfigure into per-technology
+    // modules. spring-boot-autoconfigure still owns the infrastructure (@AutoConfiguration and
+    // the @ConditionalOn* family); spring-boot-jdbc owns DataSourceAutoConfiguration.
+    api 'org.springframework.boot:spring-boot-autoconfigure'
+    api 'org.springframework.boot:spring-boot-jdbc'
+
+    // Optional integrations. Each auto-configuration is guarded by @ConditionalOnClass so the
+    // starter works without them on the classpath.
+    compileOnly 'org.springframework.boot:spring-boot-health'
+    compileOnly 'io.micrometer:micrometer-core'
+    compileOnly 'tools.jackson.core:jackson-databind'
+    compileOnly 'com.fasterxml.jackson.core:jackson-databind'
+
+    annotationProcessor 'org.springframework.boot:spring-boot-configuration-processor'
+
+    testImplementation 'org.springframework.boot:spring-boot-health'
+    testImplementation 'io.micrometer:micrometer-core'
+    // Boot's real Micrometer auto-configuration, so the ordering of our own metrics
+    // auto-configuration is exercised rather than assumed.
+    testImplementation 'org.springframework.boot:spring-boot-micrometer-metrics'
+    testImplementation 'tools.jackson.core:jackson-databind'
+    testImplementation 'com.fasterxml.jackson.core:jackson-databind'
+    testImplementation 'org.postgresql:postgresql'
+    testImplementation 'org.testcontainers:testcontainers-postgresql'
+    testImplementation 'org.testcontainers:testcontainers-junit-jupiter'
+    testImplementation 'com.zaxxer:HikariCP'
+    testImplementation 'org.awaitility:awaitility'
+    testImplementation testFixtures(project(':pgmq-core'))
+}

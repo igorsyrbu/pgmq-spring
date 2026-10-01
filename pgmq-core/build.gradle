@@ -1,0 +1,46 @@
+plugins {
+    id 'pgmq.library-conventions'
+    id 'java-test-fixtures'
+}
+
+description = 'Core PGMQ client and polling consumer runtime (plain Spring JDBC/TX, no auto-configuration)'
+
+dependencies {
+    api 'org.springframework:spring-jdbc'
+    api 'org.springframework:spring-tx'
+    api 'org.springframework:spring-context'
+
+    // Payload conversion is pluggable. Jackson 3 is the default when present; the library never
+    // hard-depends on a Jackson major.
+    compileOnly 'tools.jackson.core:jackson-databind'
+    compileOnly 'com.fasterxml.jackson.core:jackson-databind'
+
+    // Observability is optional: the runtime degrades gracefully without it.
+    compileOnly 'io.micrometer:micrometer-core'
+
+    testImplementation 'tools.jackson.core:jackson-databind'
+    testImplementation 'com.fasterxml.jackson.core:jackson-databind'
+    // What a Jackson 2 application would have: java.time support is a separate module there.
+    testImplementation 'com.fasterxml.jackson.datatype:jackson-datatype-jsr310'
+    testImplementation 'io.micrometer:micrometer-core'
+    testImplementation 'org.postgresql:postgresql'
+    // Testcontainers 2.x renamed every module artifact: postgresql -> testcontainers-postgresql.
+    testImplementation 'org.testcontainers:testcontainers-postgresql'
+    testImplementation 'org.testcontainers:testcontainers-junit-jupiter'
+    testImplementation 'org.awaitility:awaitility'
+    testImplementation 'com.zaxxer:HikariCP'
+
+    // Shared Testcontainers bootstrap, reused by the auto-configuration and sample
+    // modules so every suite runs against the same pinned PGMQ images.
+    testFixturesApi platform(
+        "org.springframework.boot:spring-boot-dependencies:${providers.gradleProperty('springBootVersion').get()}")
+    testFixturesApi 'org.testcontainers:testcontainers-postgresql'
+    testFixturesApi 'com.zaxxer:HikariCP'
+    testFixturesApi 'org.springframework:spring-jdbc'
+}
+
+// The test fixtures are this build's own Testcontainers bootstrap, shared by the other modules'
+// tests. Keep them out of the published artifact, or its POM would drag Testcontainers and
+// HikariCP into every consumer as optional dependencies.
+components.java.withVariantsFromConfiguration(configurations.testFixturesApiElements) { skip() }
+components.java.withVariantsFromConfiguration(configurations.testFixturesRuntimeElements) { skip() }

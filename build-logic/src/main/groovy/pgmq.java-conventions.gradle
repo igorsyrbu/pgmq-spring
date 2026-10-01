@@ -1,0 +1,77 @@
+plugins {
+    id 'java-library'
+    id 'com.diffplug.spotless'
+}
+
+def javaBaseline = 17
+
+java {
+    toolchain {
+        // Compile with the Spring Framework baseline so consumers on any supported JDK (17..26)
+        // can use the artifacts. -PtestJavaVersion re-runs the tests on a newer JDK.
+        languageVersion = JavaLanguageVersion.of(javaBaseline)
+    }
+}
+
+def testJavaVersion = providers.gradleProperty('testJavaVersion').orNull
+
+tasks.withType(JavaCompile).configureEach {
+    options.release = javaBaseline
+    options.encoding = 'UTF-8'
+    options.compilerArgs.addAll(['-Xlint:all,-processing,-serial', '-parameters'])
+}
+
+tasks.withType(Test).configureEach {
+    useJUnitPlatform()
+    if (testJavaVersion != null) {
+        javaLauncher = javaToolchains.launcherFor {
+            languageVersion = JavaLanguageVersion.of(testJavaVersion)
+        }
+    }
+    testLogging {
+        events 'failed'
+        exceptionFormat = 'full'
+    }
+    // Forward the image selectors to the test JVM so the same suite can run across the PGMQ
+    // and Postgres matrix with -Dpgmq.image=...
+    ['pgmq.image'].each { key ->
+        def value = providers.systemProperty(key).orNull
+        if (value != null) {
+            systemProperty key, value
+        }
+    }
+}
+
+tasks.withType(Javadoc).configureEach {
+    options.encoding = 'UTF-8'
+    options.addStringOption('Xdoclint:all,-missing', '-quiet')
+    options.links('https://docs.oracle.com/en/java/javase/17/docs/api/')
+}
+
+// Reproducible archives.
+tasks.withType(AbstractArchiveTask).configureEach {
+    preserveFileTimestamps = false
+    reproducibleFileOrder = true
+    dirPermissions { unix('rwxr-xr-x') }
+    filePermissions { unix('rw-r--r--') }
+}
+
+spotless {
+    java {
+        target 'src/*/java/**/*.java'
+        // The default engine is google-java-format, which needs --add-exports on modern JDKs and
+        // fails to load reliably when Spotless tasks run in parallel. The JavaParser-based engine
+        // has neither problem.
+        removeUnusedImports 'cleanthat-javaparser-unnecessaryimport'
+        importOrder 'java', 'javax', 'jakarta', '', 'io.github.pgmqspring', '\\#'
+        trimTrailingWhitespace()
+        leadingTabsToSpaces(4)
+        endWithNewline()
+        licenseHeaderFile(rootProject.file('config/spotless/license-header.txt'))
+    }
+    groovyGradle {
+        target '*.gradle'
+        trimTrailingWhitespace()
+        endWithNewline()
+    }
+}

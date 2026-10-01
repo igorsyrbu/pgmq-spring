@@ -1,0 +1,30 @@
+pgmq-spring
+Copyright 2026 the pgmq-spring authors
+
+This product includes software developed by
+the pgmq-spring authors (https://github.com/igorsyrbu/pgmq-spring).
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this product except in compliance with the License.
+You may obtain a copy of the License at
+
+    https://www.apache.org/licenses/LICENSE-2.0
+
+---
+
+This product is designed to work with, but does not bundle or redistribute,
+the following third-party software:
+
+  * PGMQ (https://github.com/pgmq/pgmq)
+    Licensed under the PostgreSQL License.
+
+  * Spring Boot and Spring Framework
+    (https://spring.io) - Copyright the original authors.
+    Licensed under the Apache License, Version 2.0.
+
+  * PostgreSQL (https://www.postgresql.org)
+    Licensed under the PostgreSQL License.
+
+All trademarks are the property of their respective owners. This project is
+not affiliated with, endorsed by, or sponsored by the PGMQ project, Broadcom,
+or the PostgreSQL Global Development Group.

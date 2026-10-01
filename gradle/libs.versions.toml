@@ -1,0 +1,16 @@
+# Version catalog.
+#
+# Anything managed by the Spring Boot BOM is deliberately
+# ABSENT here and left unversioned in build files - the BOM is the single
+# source of truth for those (JUnit, AssertJ, Awaitility, Testcontainers,
+# Micrometer, JSpecify, the Postgres driver, ...).
+#
+# The Boot BOM version lives in gradle.properties so a build can override it
+# with -PspringBootVersion.
+
+[versions]
+# Build-time only
+spotless = "8.0.0"
+
+[plugins]
+spotless = { id = "com.diffplug.spotless", version.ref = "spotless" }

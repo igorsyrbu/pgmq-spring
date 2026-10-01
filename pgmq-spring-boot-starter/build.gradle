@@ -1,0 +1,19 @@
+plugins {
+    id 'pgmq.library-conventions'
+}
+
+description = 'Starter for using PGMQ as a message queue with Spring Boot'
+
+dependencies {
+    // A starter contains no code: it exists to pull in a working, opinionated set of modules.
+    // Third-party starters must not be named spring-boot-starter-*, hence pgmq-spring-boot-starter.
+    api 'org.springframework.boot:spring-boot-starter'
+    api 'org.springframework.boot:spring-boot-starter-jdbc'
+    // PGMQ stores payloads in a jsonb column, so a JSON implementation is not optional the way
+    // Micrometer is - without one the client cannot serialise anything and fails at startup.
+    // spring-boot-starter-json brings Jackson 3 and its auto-configured ObjectMapper, which the
+    // PayloadConverter then reuses so payloads honour the application's own JSON settings.
+    api 'org.springframework.boot:spring-boot-starter-json'
+    api project(':pgmq-core')
+    api project(':pgmq-spring-boot-autoconfigure')
+}

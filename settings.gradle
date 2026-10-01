@@ -1,0 +1,26 @@
+pluginManagement {
+    includeBuild 'build-logic'
+    repositories {
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+plugins {
+    id 'org.gradle.toolchains.foojay-resolver-convention' version '1.0.0'
+}
+
+dependencyResolutionManagement {
+    repositoriesMode = RepositoriesMode.FAIL_ON_PROJECT_REPOS
+    repositories {
+        mavenCentral()
+    }
+}
+
+rootProject.name = 'pgmq-spring'
+
+include 'pgmq-core'
+include 'pgmq-spring-boot-autoconfigure'
+include 'pgmq-spring-boot-starter'
+include 'samples:sample-quickstart'
+include 'samples:sample-quickstart-batch'

@@ -1,0 +1,10 @@
+plugins {
+    id 'base'
+}
+
+description = 'PGMQ for the Spring ecosystem'
+
+allprojects {
+    group = providers.gradleProperty('group').get()
+    version = providers.gradleProperty('version').get()
+}
