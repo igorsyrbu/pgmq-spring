@@ -44,12 +44,15 @@ version JitPack supplies, without tests (JitPack's build machines have no Docker
 
 ### Releasing a version
 
+Use semantic version tags without a `v` prefix, such as `0.1.0`. JitPack uses the tag as the
+dependency version.
+
 1. Run the suite ([above](#before-any-release)).
 2. Tag the commit and push the tag:
 
    ```bash
-   git tag v0.1.0
-   git push origin v0.1.0
+   git tag 0.1.0
+   git push origin 0.1.0
    ```
 
 3. Optionally, create a GitHub release for the tag (**Releases → Draft a new release**) to publish
@@ -71,7 +74,7 @@ repositories {
 }
 
 dependencies {
-    implementation 'com.github.igorsyrbu.pgmq-spring:pgmq-spring-boot-starter:v0.1.0'
+    implementation 'com.github.igorsyrbu.pgmq-spring:pgmq-spring-boot-starter:0.1.0'
 }
 ```
 
@@ -86,7 +89,7 @@ dependencies {
 <dependency>
     <groupId>com.github.igorsyrbu.pgmq-spring</groupId>
     <artifactId>pgmq-spring-boot-starter</artifactId>
-    <version>v0.1.0</version>
+    <version>0.1.0</version>
 </dependency>
 ```
 
@@ -106,9 +109,9 @@ The starter brings `pgmq-core` and `pgmq-spring-boot-autoconfigure` transitively
   repository, then inspecting the POMs:
 
   ```bash
-  ./gradlew publishToMavenLocal -Pgroup=com.github.igorsyrbu -Pversion=v0.1.0 \
+  ./gradlew publishToMavenLocal -Pgroup=com.github.igorsyrbu -Pversion=0.1.0 \
       -Dmaven.repo.local=/tmp/jitpack-preview
-  ls /tmp/jitpack-preview/com/github/igorsyrbu/*/v0.1.0/
+  ls /tmp/jitpack-preview/com/github/igorsyrbu/*/0.1.0/
   ```
 
   `com.github.igorsyrbu` is JitPack's build-time `GROUP`. When JitPack exposes an individual
