@@ -204,6 +204,31 @@ own acknowledgement, so a handler that overran never commits. Issuing
 round trip per message, terminates the whole session rather than rolling back, and needs a
 connection the container does not otherwise have.
 
+### Notifications wake the loops; polling stays the source of truth
+
+With `wakeUp=NOTIFY` each container holds one connection that `LISTEN`s on
+`pgmq.q_<queue>.INSERT`, PGMQ's channel for its insert trigger, and every notification wakes all
+of the container's polling loops. A notification only says "look now": the loops still read with
+`pgmq.read`, and the regular poll stays on as a fallback, because notifications are lost in three
+ways - while the listening connection is being re-established, for messages that become visible
+without an insert (a delayed send, a retry, a released lease), and when PGMQ's per-queue throttle
+drops them. That throttle discards notifications within its interval instead of deferring them, so
+after every wake-up a loop restarts its backoff from `pollDelay`, polling a few times at short
+intervals before slowing down again. Retries the container itself schedules wake it when due.
+
+Waits between polls are on a generation counter rather than a sleep: a loop records the generation
+before it polls and waits for a later one, so a notification arriving during a poll is never
+missed. Stopping and resuming signal it too, so a container waiting out a long fallback poll stops
+at once.
+
+The notifications are read through the driver's `PGConnection`, which the pool does not see. A
+failure there would leave the pool believing the connection healthy, so before returning it the
+listener runs `unlisten *` through the pool's own proxy: on a broken connection that fails where
+the pool notices, and HikariCP evicts it instead of lending it out again. The PostgreSQL driver is
+a `compileOnly` dependency, checked when a `NOTIFY` container is built. Queue names are passed to
+`enable_notify_insert` lower-cased, because PGMQ stores the name as given but its trigger looks the
+throttle up by the lower-cased table name, so a mixed-case name would never notify.
+
 ### Leases cover the batch
 
 With `extendLease`, one lease covers every message of a polled batch from the read until each is
@@ -302,7 +327,6 @@ Multi-module Gradle, Groovy DSL, a version catalog and precompiled convention pl
 | Not provided | Why |
 |---|---|
 | Topic routing (`bind_topic` / `send_topic`) | Exists from PGMQ 1.10.0, above the 1.5.0 minimum. Capability detection reports it. |
-| `LISTEN/NOTIFY` consumption | `enable_notify_insert` exists from 1.10.0; polling works on every supported version. |
 | Annotation-driven listeners | Containers are plain beans built with a builder. |
 | Several named clients | `pgmq.datasource` selects one non-primary `DataSource`; more need hand-built `PgmqTemplate`s. |
 | Spring Cloud Stream | PGMQ has no broker-side fan-out or partitions, so most of the binder model would have to be rejected or emulated. |

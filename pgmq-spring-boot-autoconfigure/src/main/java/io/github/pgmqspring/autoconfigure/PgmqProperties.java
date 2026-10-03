@@ -31,6 +31,7 @@ import io.github.pgmqspring.core.QueueKind;
 import io.github.pgmqspring.core.client.GroupReadStrategy;
 import io.github.pgmqspring.core.consumer.AcknowledgeMode;
 import io.github.pgmqspring.core.consumer.FailureAction;
+import io.github.pgmqspring.core.consumer.WakeUp;
 
 /**
  * Configuration properties for PGMQ, all under the single {@code pgmq} namespace.
@@ -163,6 +164,20 @@ public class PgmqProperties {
          */
         private boolean fifoIndex;
 
+        /**
+         * Whether PGMQ should notify on every insert into this queue, which consumers with
+         * wake-up=notify wait for. Enabled at startup unless it already is; false leaves the
+         * queue's current setting alone. Requires PGMQ 1.10.0 or later.
+         */
+        private boolean notifyOnInsert;
+
+        /**
+         * With notify-on-insert, send at most one notification per this interval. PGMQ drops the
+         * notifications of inserts within it rather than delaying them. Unset uses PGMQ's default
+         * of 250ms; zero disables throttling.
+         */
+        private @Nullable Duration notifyThrottle;
+
         public @Nullable String getName() {
             return this.name;
         }
@@ -201,6 +216,22 @@ public class PgmqProperties {
 
         public void setFifoIndex(boolean fifoIndex) {
             this.fifoIndex = fifoIndex;
+        }
+
+        public boolean isNotifyOnInsert() {
+            return this.notifyOnInsert;
+        }
+
+        public void setNotifyOnInsert(boolean notifyOnInsert) {
+            this.notifyOnInsert = notifyOnInsert;
+        }
+
+        public @Nullable Duration getNotifyThrottle() {
+            return this.notifyThrottle;
+        }
+
+        public void setNotifyThrottle(@Nullable Duration notifyThrottle) {
+            this.notifyThrottle = notifyThrottle;
         }
     }
 
@@ -283,6 +314,15 @@ public class PgmqProperties {
          * least concurrency connections plus the application's own needs. At least 1s when set.
          */
         private @Nullable Duration longPoll;
+
+        /**
+         * How polling loops learn of new messages: POLL, or NOTIFY to also wake up on PGMQ's
+         * insert notifications, which turns max-poll-delay into a slow fallback poll. NOTIFY needs
+         * PGMQ 1.10.0, pgmq.queues[].notify-on-insert (or enableNotifyInsert) on the queue, and
+         * the PostgreSQL JDBC driver, and holds one extra connection per container. Not combinable
+         * with long-poll.
+         */
+        private WakeUp wakeUp = WakeUp.POLL;
 
         /**
          * What to do with a message after its handler returns normally: DELETE it, ARCHIVE it, or
@@ -445,6 +485,14 @@ public class PgmqProperties {
 
         public void setLongPoll(@Nullable Duration longPoll) {
             this.longPoll = longPoll;
+        }
+
+        public WakeUp getWakeUp() {
+            return this.wakeUp;
+        }
+
+        public void setWakeUp(WakeUp wakeUp) {
+            this.wakeUp = wakeUp;
         }
 
         public AcknowledgeMode getAcknowledgeMode() {

@@ -55,6 +55,8 @@ public final class ConsumerOptions {
 
     private final @Nullable Duration longPoll;
 
+    private final WakeUp wakeUp;
+
     private final boolean groupOrdered;
 
     private final GroupReadStrategy groupStrategy;
@@ -95,6 +97,7 @@ public final class ConsumerOptions {
         this.maxPollDelay = builder.maxPollDelay;
         this.pollJitter = builder.pollJitter;
         this.longPoll = builder.longPoll;
+        this.wakeUp = builder.wakeUp;
         this.groupOrdered = builder.groupOrdered;
         this.groupStrategy = builder.groupStrategy;
         this.acknowledgeMode = builder.acknowledgeMode;
@@ -135,6 +138,7 @@ public final class ConsumerOptions {
         builder.maxPollDelay = this.maxPollDelay;
         builder.pollJitter = this.pollJitter;
         builder.longPoll = this.longPoll;
+        builder.wakeUp = this.wakeUp;
         builder.groupOrdered = this.groupOrdered;
         builder.groupStrategy = this.groupStrategy;
         builder.acknowledgeMode = this.acknowledgeMode;
@@ -185,6 +189,10 @@ public final class ConsumerOptions {
 
     public @Nullable Duration getLongPoll() {
         return this.longPoll;
+    }
+
+    public WakeUp getWakeUp() {
+        return this.wakeUp;
     }
 
     /**
@@ -297,7 +305,7 @@ public final class ConsumerOptions {
         return "ConsumerOptions[concurrency=" + this.concurrency + ", batchSize=" + this.batchSize
                 + ", visibilityTimeout=" + this.visibilityTimeout + ", pollDelay=" + this.pollDelay
                 + ", maxPollDelay=" + this.maxPollDelay + ", pollJitter=" + this.pollJitter
-                + ", longPoll=" + this.longPoll
+                + ", longPoll=" + this.longPoll + ", wakeUp=" + this.wakeUp
                 + ", groupOrdered=" + this.groupOrdered + ", groupStrategy=" + this.groupStrategy
                 + ", acknowledgeMode=" + this.acknowledgeMode + ", failureAction=" + this.failureAction
                 + ", retryDelay=" + this.retryDelay + ", retryMultiplier=" + this.retryMultiplier
@@ -325,6 +333,8 @@ public final class ConsumerOptions {
         private Duration pollJitter = Duration.ZERO;
 
         private @Nullable Duration longPoll;
+
+        private WakeUp wakeUp = WakeUp.POLL;
 
         private boolean groupOrdered;
 
@@ -428,6 +438,23 @@ public final class ConsumerOptions {
          */
         public Builder longPoll(@Nullable Duration value) {
             this.longPoll = value;
+            return this;
+        }
+
+        /**
+         * How the polling loops learn of new messages. With {@link WakeUp#NOTIFY} the container
+         * holds one extra connection that listens for PGMQ's insert notifications and wakes every
+         * loop when one arrives; {@link #maxPollDelay(Duration)} then only bounds a fallback poll,
+         * and can be much longer. Retries this container schedules wake it up too, but messages
+         * sent with a delay, or made visible again by another consumer, are picked up by the
+         * fallback poll. Defaults to {@link WakeUp#POLL}.
+         *
+         * <p>{@code NOTIFY} requires PGMQ 1.10.0, insert notifications enabled on the queue
+         * ({@code PgmqOperations.enableNotifyInsert}), and the PostgreSQL JDBC driver; it cannot be
+         * combined with {@link #longPoll(Duration)}.
+         */
+        public Builder wakeUp(WakeUp value) {
+            this.wakeUp = value;
             return this;
         }
 
@@ -656,8 +683,14 @@ public final class ConsumerOptions {
                         + ") must not be shorter than retryDelay (" + this.retryDelay + ")");
             }
             requireNonNegative(this.shutdownTimeout, "shutdownTimeout");
-            if (this.groupStrategy == null || this.acknowledgeMode == null || this.failureAction == null) {
-                throw new IllegalArgumentException("groupStrategy, acknowledgeMode and failureAction must not be null");
+            if (this.groupStrategy == null || this.acknowledgeMode == null || this.failureAction == null
+                    || this.wakeUp == null) {
+                throw new IllegalArgumentException(
+                        "groupStrategy, acknowledgeMode, failureAction and wakeUp must not be null");
+            }
+            if (this.wakeUp == WakeUp.NOTIFY && this.longPoll != null) {
+                throw new IllegalArgumentException("wakeUp=NOTIFY cannot be combined with longPoll: both replace "
+                        + "empty-queue polling, and a long poll would hold its connection through every notification");
             }
             if (this.deadLetterQueue != null) {
                 io.github.pgmqspring.core.QueueNames.validate(this.deadLetterQueue);

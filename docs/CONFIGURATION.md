@@ -60,6 +60,8 @@ pgmq:
       retention-interval: "7 days"
     - name: user_events
       fifo-index: true        # for group-ordered consumers
+    - name: notifications
+      notify-on-insert: true  # for consumers with wake-up=notify
 ```
 
 | Field | Type | Default | Description |
@@ -68,6 +70,8 @@ pgmq:
 | `kind` | enum | `standard` | `standard` - a logged table. `unlogged` - faster, but **emptied by a crash or failover**; for data you can afford to lose. `partitioned` - partitioned by `pg_partman`, which must be installed. |
 | `partition-interval` | string | `10000` | `partitioned` only. A number partitions by message id range; an interval such as `1 day` partitions by time. |
 | `retention-interval` | string | `100000` | `partitioned` only. How many ids, or how much time, to keep before `pg_partman` drops old partitions. |
+| `notify-on-insert` | boolean | `false` | Make PGMQ notify on every insert into this queue (`pgmq.enable_notify_insert`), which consumers with `wake-up=notify` wait for. Enabled at startup only when it is off or its throttle differs, because enabling recreates a trigger that briefly locks the table against inserts. `false` leaves the queue's current setting alone. Requires PGMQ 1.10.0; startup fails on an older one. |
+| `notify-throttle` | duration | *PGMQ's 250ms* | With `notify-on-insert`, at most one notification per this interval. PGMQ **drops** the notifications of inserts within it rather than delaying them; a `notify` consumer covers that by polling briefly after every wake-up. `0` disables throttling. |
 | `fifo-index` | boolean | `false` | Also create the index PGMQ's grouped reads use. Enable it for every queue consumed with `group-ordered=true`; without it each grouped poll scans the table. Requires PGMQ 1.10.0. |
 
 Creation is idempotent, so the list is safe to apply on every start. An existing queue is left
@@ -97,6 +101,7 @@ builds one - see [how they reach a container](#how-consumer-properties-reach-a-c
 | `max-poll-delay` | duration | `5s` | Ceiling for the empty-queue backoff, and the wait after a failed poll (for example while the database is down). Must be at least `poll-delay`. |
 | `poll-jitter` | duration | `0` | A random extra wait, between zero and this, added to every sleep after an empty poll and after a failed poll. Instances started together - after a deploy, or when the database comes back - otherwise back off on the same schedule and poll in synchronised bursts; jitter lets their polls drift apart. Not applied to empty polls while `long-poll` is set, where the database does the waiting. `0` adds nothing. Must not be negative. |
 | `long-poll` | duration | *unset* | When set, waits inside the database (`read_with_poll`) for up to this long instead of polling and backing off. Removes empty-poll traffic but **holds a connection per loop for the whole window**. At least `1s`. |
+| `wake-up` | enum | `poll` | How polling loops learn of new messages. `poll` backs off from `poll-delay` to `max-poll-delay` on an empty queue. `notify` also wakes every loop as soon as PGMQ notifies an insert, so `max-poll-delay` only bounds a fallback poll and can be much longer (say `30s`): idle cost drops to one query per loop per fallback interval, and new messages are picked up within milliseconds. Each container then holds **one extra connection** that `LISTEN`s, reconnecting with backoff. Retries the container schedules wake it too; messages sent with a delay, or made visible again by another consumer, wait for the fallback poll. Needs PGMQ 1.10.0, `notify-on-insert` on the queue (checked at start), and the PostgreSQL JDBC driver; does not work through a transaction-mode connection pooler such as PgBouncer, which does not support `LISTEN`. Not combinable with `long-poll`. |
 | `acknowledge-mode` | enum | `delete` | After the handler returns normally: `delete` the message; `archive` it into `pgmq.a_<queue>`; or `manual` - the handler decides through its `Acknowledgement`, and doing nothing leaves it for redelivery. `manual` needs a single-message acknowledging handler. |
 | `failure-action` | enum | `redeliver` | The **terminal** action once a message has used up `max-attempts` - earlier failures are retried, unless the exception is one of `non-retryable-exceptions`. `dead-letter` moves it to `dead-letter-queue` with failure headers; `archive` archives it; `redeliver` keeps retrying and archives it once it becomes poison, because it has no terminal state of its own. |
 | `retry-delay` | duration | `5s` | Backoff before a failed message with attempts left becomes visible again - after its first delivery, when `retry-multiplier` grows it. `0` leaves its current lease to expire instead. Rounded up to whole seconds. Must not be negative. |
@@ -176,6 +181,7 @@ without any wiring.
 | `batchHandler(PgmqBatchMessageHandler<T>)` | The whole batch at once. All or nothing: a throw applies the failure handling to every message in it. Not combinable with `MANUAL`. |
 | `transactionManager(PlatformTransactionManager)` | Required for `transactional`, and what makes dead-lettering atomic (send to the dead-letter queue and delete from the source in one transaction). Without it the container warns at startup. |
 | `listener(ConsumerListener)` | Your own callbacks, for example to react to dead-lettered messages. Combine several with `CompositeConsumerListener`. The Micrometer listener does not need to be passed: Boot attaches it to every container bean, and skips a container that already has it. `container.addListener(...)` adds one after building. |
+| `notificationDataSource(DataSource)` | With `wake-up=notify`, where the listening connection comes from. Defaults to the client's own `DataSource` when the client is a `PgmqTemplate`; required for a custom `PgmqOperations`. |
 | `verifyQueuesOnStart(boolean)` | Default `true`: `start()` fails if the queue or its dead-letter queue does not exist. If the check cannot run (database unreachable) the container starts anyway and keeps retrying. Disable only when the queue is created after the container starts. |
 
 On the built container: `setPhase(int)` (default `DEFAULT_PHASE - 100`, so it stops before most
@@ -343,6 +349,7 @@ Budget, per application instance:
 - one connection per consumer loop (`concurrency`) of every container - held for the whole
   handler when `transactional`, and for the whole window when `long-poll` is set;
 - plus one while a lease is being refreshed (`extend-lease`), per container;
+- plus one held for as long as it runs, per container with `wake-up=notify`;
 - plus whatever the application itself uses.
 
 Too small a pool shows up as rising `hikaricp.connections.pending` and connection-acquire time,

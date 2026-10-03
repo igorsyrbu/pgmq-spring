@@ -29,6 +29,7 @@ import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ThreadLocalRandom;
@@ -36,6 +37,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.random.RandomGenerator;
+
+import javax.sql.DataSource;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -45,9 +48,13 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.Assert;
 
+import io.github.pgmqspring.core.PgmqCapabilities;
 import io.github.pgmqspring.core.PgmqMessage;
+import io.github.pgmqspring.core.PgmqVersion;
 import io.github.pgmqspring.core.QueueNames;
+import io.github.pgmqspring.core.UnsupportedPgmqFeatureException;
 import io.github.pgmqspring.core.client.PgmqOperations;
+import io.github.pgmqspring.core.client.PgmqTemplate;
 import io.github.pgmqspring.core.client.ReadOptions;
 import io.github.pgmqspring.core.client.SendOptions;
 
@@ -117,6 +124,15 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
 
     private volatile @Nullable ScheduledExecutorService leaseExtender;
 
+    private final WakeUpSignal wakeUp = new WakeUpSignal();
+
+    private final @Nullable DataSource notificationDataSource;
+
+    private volatile @Nullable InsertNotificationListener notifications;
+
+    /** With {@link WakeUp#NOTIFY}, wakes the loops when a retry this container scheduled is due. */
+    private volatile @Nullable ScheduledExecutorService retryWakeUps;
+
     private volatile @Nullable CountDownLatch stopped;
 
     private volatile @Nullable CountDownLatch keepAlive;
@@ -143,6 +159,7 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
         if (this.queue.equals(this.options.getDeadLetterQueue())) {
             throw new IllegalArgumentException("queue '" + this.queue + "' cannot be its own dead-letter queue");
         }
+        this.notificationDataSource = notificationDataSource(builder);
         this.listener = builder.listener != null ? builder.listener : NO_LISTENER;
         this.beanName = "pgmqListener-" + this.queue;
         PlatformTransactionManager transactionManager = builder.transactionManager;
@@ -167,6 +184,25 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
                     + "atomic, so a crash between them can duplicate or strand a message. Supply a "
                     + "transaction manager to close that window.");
         }
+    }
+
+    private @Nullable DataSource notificationDataSource(Builder<T> builder) {
+        if (this.options.getWakeUp() != WakeUp.NOTIFY) {
+            return null;
+        }
+        DataSource dataSource = builder.notificationDataSource;
+        if (dataSource == null && this.pgmq instanceof PgmqTemplate template) {
+            dataSource = template.getJdbcTemplate().getDataSource();
+        }
+        if (dataSource == null) {
+            throw new IllegalArgumentException("wakeUp=NOTIFY for queue '" + this.queue + "' needs a DataSource to "
+                    + "listen on: use a PgmqTemplate, or set the builder's notificationDataSource");
+        }
+        if (!InsertNotificationListener.driverPresent()) {
+            throw new IllegalArgumentException("wakeUp=NOTIFY for queue '" + this.queue + "' needs the PostgreSQL "
+                    + "JDBC driver (org.postgresql:postgresql) on the classpath to receive notifications");
+        }
+        return dataSource;
     }
 
     /** Creates a builder for a container reading {@code queue}. */
@@ -232,9 +268,21 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
         }
         if (this.verifyQueuesOnStart) {
             verifyQueuesExist();
+            if (this.options.getWakeUp() == WakeUp.NOTIFY) {
+                verifyInsertNotifications();
+            }
         }
         this.running.set(true);
         this.keepAlive = startKeepAlive();
+        DataSource notificationDataSource = this.notificationDataSource;
+        if (notificationDataSource != null) {
+            InsertNotificationListener listening = new InsertNotificationListener(notificationDataSource, this.queue,
+                    this.wakeUp::signal, this.beanName + "-notify");
+            listening.start();
+            this.notifications = listening;
+            this.retryWakeUps = Executors.newSingleThreadScheduledExecutor(
+                    VirtualThreads.factory(this.beanName + "-wake-"));
+        }
         int concurrency = this.options.getConcurrency();
         CountDownLatch latch = new CountDownLatch(concurrency);
         this.stopped = latch;
@@ -290,6 +338,34 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
                 throw new IllegalStateException("PGMQ queue '" + name + "'" + role + " does not exist. Create it "
                         + "first - for example with pgmq.queues[].name, or PgmqOperations.createQueue().");
             }
+        }
+    }
+
+    /**
+     * Fails fast when {@link WakeUp#NOTIFY} cannot work: PGMQ is older than 1.10.0, or does not
+     * notify on inserts into this queue - which would otherwise silently leave only the slow
+     * fallback poll. Like {@link #verifyQueuesExist()}, starts anyway if the check cannot run.
+     */
+    private void verifyInsertNotifications() {
+        Duration throttle;
+        try {
+            PgmqCapabilities capabilities = this.pgmq.capabilities();
+            capabilities.require(capabilities.insertNotify(), "wakeUp=NOTIFY (pgmq.enable_notify_insert)",
+                    new PgmqVersion(1, 10, 0));
+            throttle = this.pgmq.notifyInsertThrottle(this.queue);
+        }
+        catch (UnsupportedPgmqFeatureException ex) {
+            throw ex;
+        }
+        catch (RuntimeException ex) {
+            logger.warn("Could not verify that PGMQ notifies on inserts into queue '" + this.queue
+                    + "'; starting the listener anyway", ex);
+            return;
+        }
+        if (throttle == null) {
+            throw new IllegalStateException("PGMQ queue '" + this.queue + "' is consumed with wakeUp=NOTIFY, but PGMQ "
+                    + "does not notify on inserts into it. Enable it first - for example with "
+                    + "pgmq.queues[].notify-on-insert, or PgmqOperations.enableNotifyInsert().");
         }
     }
 
@@ -366,9 +442,12 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
         if (!this.running.compareAndSet(true, false)) {
             return null;
         }
+        // Loops waiting out a long poll delay must notice the stop now, not when the delay ends.
+        this.wakeUp.signal();
         CountDownLatch drain = new CountDownLatch(1);
         this.drained = drain;
-        return new Resources(this.stopped, this.executor, this.leaseExtender, this.keepAlive, drain);
+        return new Resources(this.stopped, this.executor, this.leaseExtender, this.keepAlive, this.notifications,
+                this.retryWakeUps, drain);
     }
 
     private void finishStop(Resources resources) {
@@ -396,6 +475,12 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
             if (resources.keepAlive() != null) {
                 resources.keepAlive().countDown();
             }
+            if (resources.notifications() != null) {
+                resources.notifications().stop();
+            }
+            if (resources.retryWakeUps() != null) {
+                resources.retryWakeUps().shutdownNow();
+            }
             synchronized (this) {
                 // Only clear what this stop captured: start() may already have run again.
                 if (this.executor == resources.pool()) {
@@ -403,6 +488,12 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
                 }
                 if (this.leaseExtender == resources.leaseExtender()) {
                     this.leaseExtender = null;
+                }
+                if (this.notifications == resources.notifications()) {
+                    this.notifications = null;
+                }
+                if (this.retryWakeUps == resources.retryWakeUps()) {
+                    this.retryWakeUps = null;
                 }
             }
         }
@@ -412,6 +503,7 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
 
     private record Resources(@Nullable CountDownLatch latch, @Nullable ExecutorService pool,
             @Nullable ScheduledExecutorService leaseExtender, @Nullable CountDownLatch keepAlive,
+            @Nullable InsertNotificationListener notifications, @Nullable ScheduledExecutorService retryWakeUps,
             CountDownLatch drained) {
     }
 
@@ -460,6 +552,7 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
     /** Resumes fetching after {@link #pause()}. */
     public void resume() {
         if (this.paused.compareAndSet(true, false)) {
+            this.wakeUp.signal();
             logger.info("Resumed PGMQ listener for queue '" + this.queue + "'");
         }
     }
@@ -477,9 +570,11 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
         Duration backoff = this.options.getPollDelay();
         int consecutiveFailures = 0;
         while (this.running.get() && !Thread.currentThread().isInterrupted()) {
+            // Taken before the poll, so a wake-up that arrives while it runs is not missed.
+            long seen = this.wakeUp.generation();
             try {
                 if (this.paused.get()) {
-                    sleep(this.options.getPollDelay());
+                    this.wakeUp.await(this.options.getPollDelay(), seen);
                     continue;
                 }
                 List<PgmqMessage<String>> batch = poll();
@@ -490,8 +585,10 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
                 }
                 safely(() -> this.listener.onPolled(this.queue, batch));
                 if (batch.isEmpty()) {
-                    sleep(this.options.getLongPoll() != null ? backoff : withJitter(backoff));
-                    backoff = nextBackoff(backoff);
+                    Duration wait = this.options.getLongPoll() != null ? backoff : withJitter(backoff);
+                    // After a wake-up, back off from the start again: polling briefly at short
+                    // intervals also finds messages whose notification PGMQ throttled away.
+                    backoff = this.wakeUp.await(wait, seen) ? this.options.getPollDelay() : nextBackoff(backoff);
                     continue;
                 }
                 backoff = this.options.getPollDelay();
@@ -521,7 +618,7 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
                     // An outage fails every poll of every loop; one stack trace per outage is enough.
                     logger.warn(message + " (" + consecutiveFailures + " consecutive failures, latest: " + ex + ")");
                 }
-                sleep(withJitter(this.options.getMaxPollDelay()));
+                this.wakeUp.await(withJitter(this.options.getMaxPollDelay()), seen);
             }
         }
     }
@@ -815,6 +912,7 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
                 Duration delay = this.options.retryDelayAfter(message.readCount());
                 if (!delay.isZero() && !delay.isNegative()) {
                     this.pgmq.setVisibilityTimeout(this.queue, message.id(), delay);
+                    scheduleWakeUp(delay);
                 }
                 // Otherwise leave it untouched: the existing visibility timeout redelivers it.
                 return;
@@ -917,6 +1015,25 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
         return template;
     }
 
+    /**
+     * With {@link WakeUp#NOTIFY}, wakes the polling loops once a retry becomes visible: making a
+     * message visible again sends no notification, so otherwise it would wait for the fallback poll.
+     */
+    private void scheduleWakeUp(Duration delay) {
+        ScheduledExecutorService scheduler = this.retryWakeUps;
+        if (scheduler == null) {
+            return;
+        }
+        // PGMQ rounds the delay up to whole seconds.
+        long seconds = Math.max(0, delay.getSeconds() + (delay.getNano() > 0 ? 1 : 0));
+        try {
+            scheduler.schedule(this.wakeUp::signal, seconds, TimeUnit.SECONDS);
+        }
+        catch (RejectedExecutionException ex) {
+            // Stopping: nothing is left to wake.
+        }
+    }
+
     private TransactionTemplate requireTransactionTemplate() {
         TransactionTemplate template = this.handlerTransactionTemplate;
         Assert.state(template != null, "transactional processing requires a PlatformTransactionManager");
@@ -976,20 +1093,6 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
             return base;
         }
         return base.plusMillis(random.nextLong(jitterMillis + 1));
-    }
-
-    private static void sleep(Duration duration) {
-        if (duration.isZero() || duration.isNegative()) {
-            return;
-        }
-        try {
-            Thread.sleep(duration.toMillis());
-        }
-        catch (InterruptedException ex) {
-            // Restore the flag: the poll loop checks it and exits. Nothing else is shared state,
-            // so an interrupt cannot leave the container half-stopped.
-            Thread.currentThread().interrupt();
-        }
     }
 
     private static Throwable rootCause(Throwable error) {
@@ -1183,6 +1286,7 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
             Assert.isTrue(delay != null && !delay.isNegative(), "delay must not be negative");
             settle(() -> PgmqMessageListenerContainer.this.pgmq.setVisibilityTimeout(
                     PgmqMessageListenerContainer.this.queue, this.message.id(), delay));
+            scheduleWakeUp(delay);
         }
 
         @Override
@@ -1190,6 +1294,7 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
             Assert.notNull(visibleAt, "visibleAt must not be null");
             settle(() -> PgmqMessageListenerContainer.this.pgmq.setVisibleAt(
                     PgmqMessageListenerContainer.this.queue, this.message.id(), visibleAt));
+            scheduleWakeUp(Duration.between(Instant.now(), visibleAt));
         }
 
         @Override
@@ -1241,6 +1346,8 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
         private @Nullable ConsumerListener listener;
 
         private boolean verifyQueuesOnStart = true;
+
+        private @Nullable DataSource notificationDataSource;
 
         private Builder(PgmqOperations pgmq, String queue, Class<T> payloadType) {
             this.pgmq = pgmq;
@@ -1296,6 +1403,16 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
          */
         public Builder<T> verifyQueuesOnStart(boolean value) {
             this.verifyQueuesOnStart = value;
+            return this;
+        }
+
+        /**
+         * The {@code DataSource} that {@link WakeUp#NOTIFY} takes its listening connection from.
+         * Defaults to the client's own when it is a {@code PgmqTemplate}; must reach the same
+         * database. Ignored with {@link WakeUp#POLL}.
+         */
+        public Builder<T> notificationDataSource(@Nullable DataSource value) {
+            this.notificationDataSource = value;
             return this;
         }
 

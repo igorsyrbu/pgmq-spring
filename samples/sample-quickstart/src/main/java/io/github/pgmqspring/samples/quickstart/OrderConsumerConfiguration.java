@@ -71,7 +71,8 @@ public class OrderConsumerConfiguration {
 
     /**
      * Built from the {@code pgmq.consumer.*} defaults in {@code application.yaml}, which turn on
-     * batch acknowledgements; only the queue and handler are set here.
+     * batch acknowledgements and wake-ups on insert notifications; only the queue and handler are
+     * set here.
      */
     @Bean
     PgmqMessageListenerContainer<OrderConfirmed> notificationListenerContainer(PgmqOperations pgmq,

@@ -12,7 +12,9 @@ consumes**. No HTTP layer, no chunking, no bookkeeping. Start here.
   and dead-lettering after three failed attempts - or at once, for an exception that is not
   retryable.
 - A second, non-transactional consumer configured entirely from `pgmq.consumer.*`, which
-  acknowledges each polled batch with one statement (`batch-acknowledgements`).
+  acknowledges each polled batch with one statement (`batch-acknowledgements`) and wakes up on
+  PGMQ's insert notifications instead of polling an idle queue (`wake-up: notify`, with
+  `notify-on-insert` on its queue; PGMQ 1.10+).
 - A default `source` header on every message sent, from `pgmq.producer.default-headers`.
 - The health indicator and Micrometer metrics the starter contributes for free.
 

@@ -154,6 +154,24 @@ public class PgmqTemplate implements PgmqOperations {
 
     private static final String SQL_CREATE_FIFO_INDEX = "select pgmq.create_fifo_index(?::text)";
 
+    // Queue names are passed lower-cased: enable_notify_insert stores the name as given, while its
+    // trigger looks the throttle up by the lower-cased table name, so a mixed-case name would
+    // never notify.
+    private static final String SQL_ENABLE_NOTIFY_INSERT = "select pgmq.enable_notify_insert(?::text)";
+
+    private static final String SQL_ENABLE_NOTIFY_INSERT_THROTTLED =
+            "select pgmq.enable_notify_insert(?::text, ?::integer)";
+
+    private static final String SQL_DISABLE_NOTIFY_INSERT = "select pgmq.disable_notify_insert(?::text)";
+
+    // The trigger name is fixed by PGMQ (verified on 1.10.0 and 1.13.0); the throttle row alone
+    // can outlive a trigger dropped by hand.
+    private static final String SQL_NOTIFY_INSERT_THROTTLE =
+            "select t.throttle_interval_ms from pgmq.notify_insert_throttle t where t.queue_name = ?::text "
+                    + "and exists (select 1 from pg_trigger g join pg_class c on c.oid = g.tgrelid "
+                    + "join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'pgmq' "
+                    + "and c.relname = ?::text and g.tgname = 'trigger_notify_queue_insert_listeners')";
+
     private static final String SQL_SET_VT_ONE_AT =
             "select msg_id from pgmq.set_vt(?::text, ?::bigint, ?::timestamptz)";
 
@@ -370,6 +388,55 @@ public class PgmqTemplate implements PgmqOperations {
         QueueNames.validate(queue);
         requireGroupedReads();
         execute(queue, SQL_CREATE_FIFO_INDEX, queue);
+    }
+
+    @Override
+    public void enableNotifyInsert(String queue) {
+        QueueNames.validate(queue);
+        requireInsertNotify();
+        execute(queue, SQL_ENABLE_NOTIFY_INSERT, QueueNames.normalize(queue));
+    }
+
+    @Override
+    public void enableNotifyInsert(String queue, Duration throttle) {
+        QueueNames.validate(queue);
+        Assert.isTrue(throttle != null && !throttle.isNegative(), "throttle must not be negative");
+        requireInsertNotify();
+        long millis = throttle.toMillis() + (throttle.toNanosPart() % 1_000_000 > 0 ? 1 : 0);
+        execute(queue, SQL_ENABLE_NOTIFY_INSERT_THROTTLED, QueueNames.normalize(queue),
+                (int) Math.min(Integer.MAX_VALUE, millis));
+    }
+
+    @Override
+    public void disableNotifyInsert(String queue) {
+        QueueNames.validate(queue);
+        if (!capabilities().insertNotify()) {
+            return;
+        }
+        execute(queue, SQL_DISABLE_NOTIFY_INSERT, QueueNames.normalize(queue));
+    }
+
+    @Override
+    public @Nullable Duration notifyInsertThrottle(String queue) {
+        QueueNames.validate(queue);
+        if (!capabilities().insertNotify()) {
+            return null;
+        }
+        String normalized = QueueNames.normalize(queue);
+        try {
+            List<Integer> throttle = this.jdbcTemplate.queryForList(SQL_NOTIFY_INSERT_THROTTLE, Integer.class,
+                    normalized, "q_" + normalized);
+            return throttle.isEmpty() ? null : Duration.ofMillis(throttle.get(0));
+        }
+        catch (DataAccessException ex) {
+            throw translate(queue, ex);
+        }
+    }
+
+    private void requireInsertNotify() {
+        PgmqCapabilities detected = capabilities();
+        detected.require(detected.insertNotify(), "insert notifications (pgmq.enable_notify_insert)",
+                new PgmqVersion(1, 10, 0));
     }
 
     @Override

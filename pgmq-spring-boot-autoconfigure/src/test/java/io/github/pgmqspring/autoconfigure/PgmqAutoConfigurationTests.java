@@ -38,16 +38,20 @@ import org.springframework.context.annotation.Configuration;
 
 import io.github.pgmqspring.core.PgmqContainerSupport;
 import io.github.pgmqspring.core.PgmqNotInstalledException;
+import io.github.pgmqspring.core.UnsupportedPgmqFeatureException;
 import io.github.pgmqspring.core.client.PgmqOperations;
 import io.github.pgmqspring.core.client.PgmqTemplate;
 import io.github.pgmqspring.core.consumer.AcknowledgeMode;
 import io.github.pgmqspring.core.consumer.ConsumerOptions;
 import io.github.pgmqspring.core.consumer.FailureAction;
+import io.github.pgmqspring.core.consumer.WakeUp;
 import io.github.pgmqspring.core.convert.JacksonPayloadConverter;
 import io.github.pgmqspring.core.convert.PayloadConversionException;
 import io.github.pgmqspring.core.convert.PayloadConverter;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assumptions.assumeFalse;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * Tests for the auto-configuration: bean creation, back-off, and property binding.
@@ -213,6 +217,52 @@ class PgmqAutoConfigurationTests {
                         context.getBean(PgmqTemplate.class).getDefaultHeaders())
                                 .isEqualTo(Map.of("source", "order-service", "app.version", "2")));
         this.runner.run((context) -> assertThat(context.getBean(PgmqTemplate.class).getDefaultHeaders()).isEmpty());
+    }
+
+    private static boolean insertNotifySupported() {
+        return new PgmqTemplate(PgmqContainerSupport.dataSource(), new JacksonPayloadConverter()).capabilities()
+                .insertNotify();
+    }
+
+    @Test
+    void bindsWakeUp() {
+        this.runner.withPropertyValues("pgmq.consumer.wake-up=notify").run((context) -> assertThat(
+                context.getBean(ConsumerOptions.class).getWakeUp()).isEqualTo(WakeUp.NOTIFY));
+        this.runner.run((context) -> assertThat(context.getBean(ConsumerOptions.class).getWakeUp())
+                .isEqualTo(WakeUp.POLL));
+    }
+
+    @Test
+    void enablesInsertNotificationsOnConfiguredQueues() {
+        assumeTrue(insertNotifySupported(), "insert notifications need PGMQ 1.10.0");
+        String queue = PgmqContainerSupport.uniqueQueueName("autoconf_notify");
+        String throttled = PgmqContainerSupport.uniqueQueueName("autoconf_notify_throttled");
+        String[] properties = {
+            "pgmq.queues[0].name=" + queue,
+            "pgmq.queues[0].notify-on-insert=true",
+            "pgmq.queues[1].name=" + throttled,
+            "pgmq.queues[1].notify-on-insert=true",
+            "pgmq.queues[1].notify-throttle=40ms",
+        };
+        this.runner.withPropertyValues(properties).run((context) -> {
+            PgmqTemplate pgmq = context.getBean(PgmqTemplate.class);
+            assertThat(pgmq.notifyInsertThrottle(queue)).isEqualTo(Duration.ofMillis(250));
+            assertThat(pgmq.notifyInsertThrottle(throttled)).isEqualTo(Duration.ofMillis(40));
+        });
+        // A changed throttle is applied on the next start; an unchanged one is left alone.
+        this.runner.withPropertyValues(properties).withPropertyValues("pgmq.queues[1].notify-throttle=60ms")
+                .run((context) -> assertThat(context.getBean(PgmqTemplate.class).notifyInsertThrottle(throttled))
+                        .isEqualTo(Duration.ofMillis(60)));
+    }
+
+    @Test
+    void failsStartupWhenInsertNotificationsAreUnsupported() {
+        assumeFalse(insertNotifySupported(), "only PGMQ before 1.10.0 lacks insert notifications");
+        this.runner.withPropertyValues(
+                "pgmq.queues[0].name=" + PgmqContainerSupport.uniqueQueueName("autoconf_notify_old"),
+                "pgmq.queues[0].notify-on-insert=true").run((context) -> assertThat(context).hasFailed()
+                        .getFailure().rootCause().isInstanceOf(UnsupportedPgmqFeatureException.class)
+                        .hasMessageContaining("1.10.0"));
     }
 
     @Test

@@ -18,6 +18,10 @@ dependencies {
     // Observability is optional: the runtime degrades gracefully without it.
     compileOnly 'io.micrometer:micrometer-core'
 
+    // Only wake-up=NOTIFY needs it, to receive LISTEN notifications; an application talking to
+    // Postgres has it anyway, and the container checks for it before relying on it.
+    compileOnly 'org.postgresql:postgresql'
+
     testImplementation 'tools.jackson.core:jackson-databind'
     testImplementation 'com.fasterxml.jackson.core:jackson-databind'
     // What a Jackson 2 application would have: java.time support is a separate module there.

@@ -32,6 +32,8 @@ import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Primary;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -41,6 +43,8 @@ import io.github.pgmqspring.core.client.PgmqTemplate;
 import io.github.pgmqspring.core.client.ReadOptions;
 import io.github.pgmqspring.core.consumer.DeadLetterHeaders;
 import io.github.pgmqspring.core.consumer.PgmqMessageListenerContainer;
+import io.github.pgmqspring.core.consumer.WakeUp;
+import io.github.pgmqspring.core.convert.JacksonPayloadConverter;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
@@ -52,6 +56,28 @@ import static org.awaitility.Awaitility.await;
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
 @TestPropertySource(properties = {"spring.sql.init.mode=always", "sample.demo.enabled=false"})
 class QuickstartIntegrationTests {
+
+    /**
+     * The sample enables insert notifications, which need PGMQ 1.10.0. The suite also runs against
+     * older PGMQ, where the same sample falls back to polling.
+     */
+    @DynamicPropertySource
+    static void pollOnPgmqWithoutInsertNotifications(DynamicPropertyRegistry registry) {
+        if (insertNotifySupported()) {
+            return;
+        }
+        registry.add("pgmq.consumer.wake-up", () -> "poll");
+        registry.add("pgmq.consumer.max-poll-delay", () -> "5s");
+        // A list is bound from one property source as a whole, so every entry is restated.
+        registry.add("pgmq.queues[0].name", () -> "orders");
+        registry.add("pgmq.queues[1].name", () -> "orders_dlq");
+        registry.add("pgmq.queues[2].name", () -> "order_notifications");
+    }
+
+    private static boolean insertNotifySupported() {
+        return new PgmqTemplate(PgmqContainerSupport.dataSource(), new JacksonPayloadConverter()).capabilities()
+                .insertNotify();
+    }
 
     @Autowired
     private OrderService orderService;
@@ -93,6 +119,10 @@ class QuickstartIntegrationTests {
         PgmqMessageListenerContainer<?> notifications =
                 this.applicationContext.getBean("notificationListenerContainer", PgmqMessageListenerContainer.class);
         assertThat(notifications.getOptions().isBatchAcknowledgements()).isTrue();
+        if (insertNotifySupported()) {
+            assertThat(notifications.getOptions().getWakeUp()).isEqualTo(WakeUp.NOTIFY);
+            assertThat(this.pgmq.notifyInsertThrottle(NotificationHandler.QUEUE)).isNotNull();
+        }
 
         for (int i = 0; i < 5; i++) {
             this.orderService.placeOrder("notify-" + i, "customer-" + i, 100);

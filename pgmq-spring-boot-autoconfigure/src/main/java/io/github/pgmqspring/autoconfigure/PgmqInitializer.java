@@ -18,6 +18,8 @@
 
 package io.github.pgmqspring.autoconfigure;
 
+import java.time.Duration;
+
 import javax.sql.DataSource;
 
 import org.apache.commons.logging.Log;
@@ -88,9 +90,34 @@ public class PgmqInitializer implements InitializingBean {
                     return true;
                 });
             }
+            if (queue.isNotifyOnInsert()) {
+                ensureNotifyOnInsert(template, queue, name);
+            }
             logger.info("Ensured PGMQ queue '" + name + "' (" + queue.getKind() + ")"
-                    + (queue.isFifoIndex() ? " with a FIFO index" : "") + " exists");
+                    + (queue.isFifoIndex() ? " with a FIFO index" : "")
+                    + (queue.isNotifyOnInsert() ? " with insert notifications" : "") + " exists");
         }
+    }
+
+    /**
+     * Enables insert notifications only when they are off or their throttle differs: enabling
+     * recreates the queue's trigger, which briefly locks the table against inserts, so doing it on
+     * every start of every instance would stall producers for nothing.
+     */
+    private static void ensureNotifyOnInsert(PgmqOperations template, PgmqProperties.Queue queue, String name) {
+        Duration throttle = queue.getNotifyThrottle();
+        Duration current = template.notifyInsertThrottle(name);
+        if (current != null && (throttle == null || current.equals(throttle))) {
+            return;
+        }
+        ensure(name, () -> {
+            if (throttle != null) {
+                template.enableNotifyInsert(name, throttle);
+            }
+            else {
+                template.enableNotifyInsert(name);
+            }
+        }, () -> template.notifyInsertThrottle(name) != null);
     }
 
     private static void ensureQueue(PgmqOperations template, PgmqProperties.Queue queue, String name) {

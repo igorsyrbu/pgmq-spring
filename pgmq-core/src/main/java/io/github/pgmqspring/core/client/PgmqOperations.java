@@ -24,11 +24,14 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 
+import org.jspecify.annotations.Nullable;
+
 import io.github.pgmqspring.core.PgmqCapabilities;
 import io.github.pgmqspring.core.PgmqMessage;
 import io.github.pgmqspring.core.QueueInfo;
 import io.github.pgmqspring.core.QueueKind;
 import io.github.pgmqspring.core.QueueMetrics;
+import io.github.pgmqspring.core.QueueNames;
 import io.github.pgmqspring.core.convert.PayloadConverter;
 
 /**
@@ -123,6 +126,44 @@ public interface PgmqOperations {
      *     does not provide grouped reads
      */
     void createFifoIndex(String queue);
+
+    /**
+     * Makes PGMQ send a notification on the channel {@link #notifyInsertChannel(String)} whenever a
+     * message is inserted into this queue, with PGMQ's default throttle of 250 ms. A listener
+     * container with {@code wakeUp(WakeUp.NOTIFY)} waits for it instead of polling.
+     *
+     * <p>Requires PGMQ 1.10.0 or later. Recreates the queue's notification trigger, which briefly
+     * locks its table against inserts, so call it once rather than on every startup - or check
+     * {@link #notifyInsertThrottle(String)} first.
+     *
+     * @throws io.github.pgmqspring.core.UnsupportedPgmqFeatureException if the installed PGMQ
+     *     does not provide insert notifications
+     */
+    void enableNotifyInsert(String queue);
+
+    /**
+     * As {@link #enableNotifyInsert(String)}, sending at most one notification per {@code throttle}.
+     *
+     * <p>PGMQ <em>drops</em> the notifications of inserts within the throttle interval rather than
+     * delaying them, so a consumer must not rely on one per message; the listener container keeps
+     * polling briefly after every wake-up for that reason. Rounded up to whole milliseconds; zero
+     * disables throttling.
+     */
+    void enableNotifyInsert(String queue, Duration throttle);
+
+    /** Stops insert notifications for this queue. Does nothing when they are not enabled. */
+    void disableNotifyInsert(String queue);
+
+    /**
+     * The throttle of this queue's insert notifications, or {@code null} when they are not enabled,
+     * including on PGMQ versions that do not provide them.
+     */
+    @Nullable Duration notifyInsertThrottle(String queue);
+
+    /** The channel PGMQ notifies on for inserts into this queue, as an unquoted identifier. */
+    static String notifyInsertChannel(String queue) {
+        return "pgmq.q_" + QueueNames.normalize(queue) + ".INSERT";
+    }
 
     /** Returns depth and age metrics for one queue. */
     QueueMetrics metrics(String queue);

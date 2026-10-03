@@ -15,6 +15,8 @@ pgmq:
     - name: orders
     - name: orders_dlq
     - name: order_notifications
+      # PGMQ notifies on every insert, which the notification consumer waits for (PGMQ 1.10+).
+      notify-on-insert: true
   producer:
     # Every message this application sends carries these, unless a send sets its own.
     default-headers:
@@ -23,6 +25,9 @@ pgmq:
   consumer:
     # One delete per polled batch instead of one per message. Not for transactional consumers.
     batch-acknowledgements: true
+    # Wake up on PGMQ's insert notifications; the regular poll becomes a 30s fallback.
+    wake-up: notify
+    max-poll-delay: 30s
   health:
     queues:
       - orders
