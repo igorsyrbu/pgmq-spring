@@ -20,7 +20,9 @@ package io.github.pgmqspring.autoconfigure;
 
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 import org.jspecify.annotations.Nullable;
 import org.springframework.boot.context.properties.ConfigurationProperties;
@@ -212,6 +214,21 @@ public class PgmqProperties {
          * least 1 when set.
          */
         private @Nullable Integer maxBatchSize;
+
+        /**
+         * Headers added to every message sent, including every message of a batch and messages
+         * moved to a dead-letter queue. A header of the same name set on the send wins. Use
+         * bracket notation for names containing dots, for example "[app.version]".
+         */
+        private Map<String, String> defaultHeaders = new LinkedHashMap<>();
+
+        public Map<String, String> getDefaultHeaders() {
+            return this.defaultHeaders;
+        }
+
+        public void setDefaultHeaders(Map<String, String> defaultHeaders) {
+            this.defaultHeaders = defaultHeaders;
+        }
 
         public @Nullable Integer getMaxBatchSize() {
             return this.maxBatchSize;

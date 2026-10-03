@@ -146,6 +146,8 @@ class QuickstartIntegrationTests {
                 .anySatisfy((message) -> {
                     assertThat(message.rawPayload()).contains("bad-order");
                     assertThat(message.header(DeadLetterHeaders.READ_COUNT)).isEqualTo(1);
+                    // pgmq.producer.default-headers, carried over from the original message.
+                    assertThat(message.header("source")).isEqualTo("quickstart-sample");
                 });
         assertThat(confirmed("bad-order")).isFalse();
     }

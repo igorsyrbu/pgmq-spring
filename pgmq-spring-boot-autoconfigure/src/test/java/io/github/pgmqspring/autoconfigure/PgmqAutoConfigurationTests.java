@@ -19,6 +19,7 @@
 package io.github.pgmqspring.autoconfigure;
 
 import java.time.Duration;
+import java.util.Map;
 
 import javax.sql.DataSource;
 
@@ -203,6 +204,15 @@ class PgmqAutoConfigurationTests {
         this.runner.withPropertyValues("pgmq.producer.max-batch-size=500").run((context) -> assertThat(
                 context.getBean(PgmqTemplate.class).getMaxBatchSize()).isEqualTo(500));
         this.runner.run((context) -> assertThat(context.getBean(PgmqTemplate.class).getMaxBatchSize()).isNull());
+    }
+
+    @Test
+    void appliesTheProducerDefaultHeaders() {
+        this.runner.withPropertyValues("pgmq.producer.default-headers.source=order-service",
+                "pgmq.producer.default-headers.[app.version]=2").run((context) -> assertThat(
+                        context.getBean(PgmqTemplate.class).getDefaultHeaders())
+                                .isEqualTo(Map.of("source", "order-service", "app.version", "2")));
+        this.runner.run((context) -> assertThat(context.getBean(PgmqTemplate.class).getDefaultHeaders()).isEmpty());
     }
 
     @Test

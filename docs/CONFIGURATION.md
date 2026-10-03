@@ -80,6 +80,7 @@ Applied to the auto-configured `PgmqTemplate`; a hand-built one has the same set
 
 | Property | Type | Default | Setter | Description |
 |---|---|---|---|---|
+| `pgmq.producer.default-headers` | map | empty | `setDefaultHeaders(Map)` | Headers added to every message sent - single sends and every message of a batch - such as the sending service or a schema version. A header of the same name in the `SendOptions` wins, and an `OutboundMessage`'s own header wins over both. Dead-lettering sends through the same client, so a dead-lettered message also gets any default header its original lacked. Use bracket notation for names with dots: `pgmq.producer.default-headers.[app.version]`. |
 | `pgmq.producer.max-batch-size` | int | *unset* | `setMaxBatchSize(Integer)` | Most messages per `send_batch` statement. A longer `sendBatch`, `sendRawBatch` or `sendMessages` list is split into several statements, bounding the size of each statement's JSON parameter and the work one statement does. The chunks of a call stay **atomic**: they join the caller's transaction when one is bound to the client's `DataSource`, and otherwise run in a transaction of their own. Ids come back in input order, and `pgmq.send.duration` records one sample per statement. Unset sends every batch as one statement. At least 1 when set. |
 
 ### Consumer defaults (`pgmq.consumer.*`)
@@ -244,7 +245,7 @@ pgmq.sendMessages("user_events", events.stream()
 | `group(key)` | Set `x-pgmq-group` for this message. |
 
 - Headers in the `SendOptions` are **defaults** for every message; a message's own header of the
-  same name wins.
+  same name wins. `pgmq.producer.default-headers` sit below both.
 - The delay or delivery time in `SendOptions` applies to the **whole batch**: PGMQ's `send_batch`
   takes a single one. Send separately when messages need different delays.
 - Ids come back in the order of the list, and messages are enqueued in that order.

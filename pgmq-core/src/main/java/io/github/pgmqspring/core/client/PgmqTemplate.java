@@ -28,6 +28,7 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -215,6 +216,8 @@ public class PgmqTemplate implements PgmqOperations {
 
     private volatile @Nullable Integer maxBatchSize;
 
+    private volatile Map<String, Object> defaultHeaders = Map.of();
+
     /**
      * Creates a template on the given {@link DataSource}.
      *
@@ -278,6 +281,26 @@ public class PgmqTemplate implements PgmqOperations {
     /** The most messages sent per statement, or {@code null} when batches are never split. */
     public @Nullable Integer getMaxBatchSize() {
         return this.maxBatchSize;
+    }
+
+    /**
+     * Headers added to every message this template sends - single sends and every message of a
+     * batch - such as the sending service or a schema version. A header of the same name in the
+     * {@link SendOptions}, or on an {@link OutboundMessage}, wins.
+     *
+     * <p>Dead-lettering sends through the same template, so a dead-lettered message also gets any
+     * default header its original did not already carry.
+     *
+     * @param defaultHeaders header names and JSON-serializable values; empty for none
+     */
+    public void setDefaultHeaders(Map<String, ?> defaultHeaders) {
+        Assert.notNull(defaultHeaders, "defaultHeaders must not be null");
+        this.defaultHeaders = Map.copyOf(defaultHeaders);
+    }
+
+    /** The headers added to every message sent, unless overridden. */
+    public Map<String, Object> getDefaultHeaders() {
+        return this.defaultHeaders;
     }
 
     // ---------------------------------------------------------------------
@@ -441,8 +464,9 @@ public class PgmqTemplate implements PgmqOperations {
         jsonPayloads.forEach((json) -> Assert.hasText(json, "json payloads must not be empty"));
         // PGMQ requires the headers array to be either null or the same length as the payloads.
         List<String> headers = null;
-        if (options.hasHeaders()) {
-            String single = this.payloadConverter.toJson(options.getHeaders());
+        Map<String, Object> shared = withDefaultHeaders(options.getHeaders());
+        if (!shared.isEmpty()) {
+            String single = this.payloadConverter.toJson(shared);
             headers = jsonPayloads.stream().map((ignored) -> single).toList();
         }
         return sendBatchStatements(queue, jsonPayloads, headers, options);
@@ -463,13 +487,14 @@ public class PgmqTemplate implements PgmqOperations {
         List<String> payloads = new ArrayList<>(messages.size());
         List<String> headers = new ArrayList<>(messages.size());
         boolean anyHeaders = false;
+        Map<String, Object> shared = withDefaultHeaders(options.getHeaders());
         for (OutboundMessage message : messages) {
             Assert.notNull(message, "messages must not contain null");
             payloads.add(message.json() ? (String) message.payload() : this.payloadConverter.toJson(message.payload()));
-            Map<String, Object> merged = options.getHeaders();
+            Map<String, Object> merged = shared;
             if (!message.headers().isEmpty()) {
                 // Shared headers are defaults; the message's own value wins on a name clash.
-                merged = new java.util.LinkedHashMap<>(options.getHeaders());
+                merged = new LinkedHashMap<>(shared);
                 merged.putAll(message.headers());
             }
             if (merged.isEmpty()) {
@@ -954,7 +979,18 @@ public class PgmqTemplate implements PgmqOperations {
     }
 
     private @Nullable String headersJson(SendOptions options) {
-        return options.hasHeaders() ? this.payloadConverter.toJson(options.getHeaders()) : null;
+        Map<String, Object> headers = withDefaultHeaders(options.getHeaders());
+        return !headers.isEmpty() ? this.payloadConverter.toJson(headers) : null;
+    }
+
+    private Map<String, Object> withDefaultHeaders(Map<String, Object> headers) {
+        Map<String, Object> defaults = this.defaultHeaders;
+        if (defaults.isEmpty()) {
+            return headers;
+        }
+        Map<String, Object> merged = new LinkedHashMap<>(defaults);
+        merged.putAll(headers);
+        return merged;
     }
 
     private static int delaySeconds(SendOptions options) {

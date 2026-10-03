@@ -13,6 +13,7 @@ consumes**. No HTTP layer, no chunking, no bookkeeping. Start here.
   retryable.
 - A second, non-transactional consumer configured entirely from `pgmq.consumer.*`, which
   acknowledges each polled batch with one statement (`batch-acknowledgements`).
+- A default `source` header on every message sent, from `pgmq.producer.default-headers`.
 - The health indicator and Micrometer metrics the starter contributes for free.
 
 ## Running it

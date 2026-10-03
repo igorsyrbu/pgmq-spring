@@ -15,6 +15,10 @@ pgmq:
     - name: orders
     - name: orders_dlq
     - name: order_notifications
+  producer:
+    # Every message this application sends carries these, unless a send sets its own.
+    default-headers:
+      source: quickstart-sample
   # Defaults for containers built from the ConsumerOptions bean - here the notification consumer.
   consumer:
     # One delete per polled batch instead of one per message. Not for transactional consumers.
