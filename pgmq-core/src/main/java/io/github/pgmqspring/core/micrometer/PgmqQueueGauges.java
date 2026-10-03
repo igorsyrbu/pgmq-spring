@@ -18,10 +18,13 @@
 
 package io.github.pgmqspring.core.micrometer;
 
+import java.time.Duration;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.LongSupplier;
 
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -31,6 +34,7 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 
 import io.github.pgmqspring.core.QueueMetrics;
+import io.github.pgmqspring.core.QueueNames;
 import io.github.pgmqspring.core.client.PgmqOperations;
 
 /**
@@ -41,25 +45,84 @@ import io.github.pgmqspring.core.client.PgmqOperations;
  *
  * <p>Gauges are read through a cached snapshot rather than by querying PGMQ on every scrape:
  * {@code pgmq.metrics()} scans the queue table, so letting three gauges each trigger their own
- * query would triple that cost. The snapshot is refreshed at most once per
- * {@link #MIN_REFRESH_INTERVAL_MILLIS}.
+ * query would triple that cost. Each queue's snapshot is refreshed at most once per its refresh
+ * interval - {@link #DEFAULT_REFRESH_INTERVAL} unless configured - however often it is scraped.
  */
 public class PgmqQueueGauges implements MeterBinder {
 
-    /** Minimum interval between {@code pgmq.metrics()} calls per queue. */
-    public static final long MIN_REFRESH_INTERVAL_MILLIS = 1000;
+    /**
+     * Default interval between {@code pgmq.metrics()} calls per queue: inside a typical 15-second
+     * scrape interval, so dashboards keep their resolution, at a tenth of the queries of one second.
+     */
+    public static final Duration DEFAULT_REFRESH_INTERVAL = Duration.ofSeconds(10);
 
     private static final Log logger = LogFactory.getLog(PgmqQueueGauges.class);
+
+    private static final long NEVER = Long.MIN_VALUE;
 
     private final PgmqOperations pgmq;
 
     private final List<String> queues;
 
+    private final long defaultRefreshMillis;
+
+    /** Overrides by normalized queue name. */
+    private final Map<String, Long> refreshMillisOverrides;
+
+    private final LongSupplier clockMillis;
+
     private final Map<String, Snapshot> snapshots = new ConcurrentHashMap<>();
 
+    /** Gauges for {@code queues}, each refreshed at most every {@link #DEFAULT_REFRESH_INTERVAL}. */
     public PgmqQueueGauges(PgmqOperations pgmq, List<String> queues) {
+        this(pgmq, queues, DEFAULT_REFRESH_INTERVAL, Map.of());
+    }
+
+    /**
+     * Gauges for {@code queues}, each refreshed at most every {@code refreshInterval}, or every
+     * interval given for it in {@code refreshIntervals}.
+     *
+     * @throws IllegalArgumentException if an interval is not positive, or an override names a
+     *     queue that is not in {@code queues}, where it would silently do nothing
+     */
+    public PgmqQueueGauges(PgmqOperations pgmq, List<String> queues, Duration refreshInterval,
+            Map<String, Duration> refreshIntervals) {
+        this(pgmq, queues, refreshInterval, refreshIntervals, System::currentTimeMillis);
+    }
+
+    PgmqQueueGauges(PgmqOperations pgmq, List<String> queues, Duration refreshInterval,
+            Map<String, Duration> refreshIntervals, LongSupplier clockMillis) {
         this.pgmq = pgmq;
         this.queues = List.copyOf(queues);
+        this.defaultRefreshMillis = positiveMillis(refreshInterval, "refreshInterval");
+        List<String> listed = this.queues.stream().map(QueueNames::normalize).toList();
+        Map<String, Long> overrides = new LinkedHashMap<>();
+        refreshIntervals.forEach((queue, interval) -> {
+            String normalized = QueueNames.normalize(queue);
+            if (!listed.contains(normalized)) {
+                throw new IllegalArgumentException("refreshIntervals names queue '" + queue
+                        + "', which is not one of the gauged queues " + this.queues);
+            }
+            overrides.put(normalized, positiveMillis(interval, "refreshIntervals[" + queue + "]"));
+        });
+        this.refreshMillisOverrides = Map.copyOf(overrides);
+        this.clockMillis = clockMillis;
+    }
+
+    private static long positiveMillis(Duration interval, String name) {
+        if (interval == null || interval.isZero() || interval.isNegative()) {
+            throw new IllegalArgumentException(name + " must be positive, but was " + interval);
+        }
+        return interval.toMillis();
+    }
+
+    /** How often {@code queue}'s gauges re-query {@code pgmq.metrics()} at most. */
+    public Duration refreshInterval(String queue) {
+        return Duration.ofMillis(refreshMillis(queue));
+    }
+
+    private long refreshMillis(String queue) {
+        return this.refreshMillisOverrides.getOrDefault(QueueNames.normalize(queue), this.defaultRefreshMillis);
     }
 
     @Override
@@ -84,9 +147,10 @@ public class PgmqQueueGauges implements MeterBinder {
 
     private Snapshot snapshot(String queue) {
         Snapshot current = this.snapshots.computeIfAbsent(queue, (q) -> new Snapshot());
-        long now = System.currentTimeMillis();
+        long now = this.clockMillis.getAsLong();
         long last = current.refreshedAt.get();
-        if (now - last >= MIN_REFRESH_INTERVAL_MILLIS && current.refreshedAt.compareAndSet(last, now)) {
+        boolean due = last == NEVER || now - last >= refreshMillis(queue);
+        if (due && current.refreshedAt.compareAndSet(last, now)) {
             try {
                 QueueMetrics metrics = this.pgmq.metrics(queue);
                 current.queueLength = metrics.queueLength();
@@ -104,7 +168,7 @@ public class PgmqQueueGauges implements MeterBinder {
 
     private static final class Snapshot {
 
-        private final AtomicLong refreshedAt = new AtomicLong();
+        private final AtomicLong refreshedAt = new AtomicLong(NEVER);
 
         private volatile double queueLength;
 

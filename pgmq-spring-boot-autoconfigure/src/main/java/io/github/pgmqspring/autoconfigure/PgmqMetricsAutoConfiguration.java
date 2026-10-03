@@ -98,6 +98,8 @@ public class PgmqMetricsAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean
     public PgmqQueueGauges pgmqQueueGauges(PgmqOperations pgmq, PgmqProperties properties) {
-        return new PgmqQueueGauges(pgmq, properties.getMetrics().getQueues());
+        PgmqProperties.Metrics metrics = properties.getMetrics();
+        return new PgmqQueueGauges(pgmq, metrics.getQueues(), metrics.getRefreshInterval(),
+                metrics.getRefreshIntervals());
     }
 }

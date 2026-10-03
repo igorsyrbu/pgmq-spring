@@ -34,6 +34,11 @@ pgmq:
   metrics:
     queues:
       - orders
+      - order_notifications
+    # Each gauged queue re-queries pgmq.metrics() at most every 10s - except orders, every 2s.
+    refresh-interval: 10s
+    refresh-intervals:
+      orders: 2s
 
 
 logging:

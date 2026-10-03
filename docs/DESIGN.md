@@ -346,8 +346,8 @@ Multi-module Gradle, Groovy DSL, a version catalog and precompiled convention pl
   startup.
 - **Archive tables grow without bound** under `ARCHIVE`. Prune them, or use a partitioned queue
   with a retention interval.
-- **Queue gauges poll `pgmq.metrics()`**, which scans the queue table; the result is cached for one
-  second per queue. They keep their last value while the database is unreachable - alert on
+- **Queue gauges poll `pgmq.metrics()`**, which scans the queue table; the result is cached per
+  queue for `pgmq.metrics.refresh-interval` (10 seconds by default), so a gauge can be that old. They keep their last value while the database is unreachable - alert on
   `pgmq.poll.errors` or the health indicator for outages.
 
 ---

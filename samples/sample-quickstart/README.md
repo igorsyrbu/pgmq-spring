@@ -16,7 +16,8 @@ consumes**. No HTTP layer, no chunking, no bookkeeping. Start here.
   PGMQ's insert notifications instead of polling an idle queue (`wake-up: notify`, with
   `notify-on-insert` on its queue; PGMQ 1.10+).
 - A default `source` header on every message sent, from `pgmq.producer.default-headers`.
-- The health indicator and Micrometer metrics the starter contributes for free.
+- The health indicator and Micrometer metrics the starter contributes for free, with queue gauges
+  refreshed every 10 seconds - and every 2 for `orders`, through `pgmq.metrics.refresh-intervals`.
 
 ## Running it
 

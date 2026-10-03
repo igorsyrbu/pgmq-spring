@@ -136,7 +136,9 @@ Invalid combinations fail at startup with a message naming the property, for exa
 | Property | Type | Default | Description |
 |---|---|---|---|
 | `pgmq.metrics.enabled` | boolean | `true` | Record Micrometer meters. Active only when a `MeterRegistry` exists (for example with `spring-boot-starter-actuator`). |
-| `pgmq.metrics.queues` | list | empty | Queues published as depth and age gauges. Each is refreshed from `pgmq.metrics()` at most once a second, however often it is scraped. |
+| `pgmq.metrics.queues` | list | empty | Queues published as depth and age gauges. Each is refreshed from `pgmq.metrics()` at most once per its refresh interval, however often it is scraped. |
+| `pgmq.metrics.refresh-interval` | duration | `10s` | Most often a gauged queue re-queries `pgmq.metrics()`, which scans the queue table; scrapes in between return the cached values, so gauges can be up to this old. 10 seconds fits inside a typical 15-second scrape interval at a tenth of the queries of one second. **Changed from a fixed 1 second**; `1s` restores that. Must be positive. |
+| `pgmq.metrics.refresh-intervals` | map | empty | Per-queue overrides of `refresh-interval`, for example `pgmq.metrics.refresh-intervals.payments=2s` for a small queue whose depth should be nearly live. Every key must be one of `pgmq.metrics.queues`, or startup fails. Must be positive. |
 
 The percentiles of the library's timers are not published by default; enable them the usual Boot
 way, for example `management.metrics.distribution.percentiles.pgmq.processing.duration=0.5,0.95,0.99`.

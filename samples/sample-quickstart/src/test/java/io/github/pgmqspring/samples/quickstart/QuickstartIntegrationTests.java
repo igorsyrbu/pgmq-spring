@@ -45,6 +45,7 @@ import io.github.pgmqspring.core.consumer.DeadLetterHeaders;
 import io.github.pgmqspring.core.consumer.PgmqMessageListenerContainer;
 import io.github.pgmqspring.core.consumer.WakeUp;
 import io.github.pgmqspring.core.convert.JacksonPayloadConverter;
+import io.github.pgmqspring.core.micrometer.PgmqQueueGauges;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
@@ -207,6 +208,10 @@ class QuickstartIntegrationTests {
         MeterRegistry registry = this.applicationContext.getBean(MeterRegistry.class);
         assertThat(registry.get("pgmq.messages.sent").tag("queue", OrderService.QUEUE).counter().count())
                 .isPositive();
+        PgmqQueueGauges gauges = this.applicationContext.getBean(PgmqQueueGauges.class);
+        assertThat(gauges.refreshInterval(OrderService.QUEUE)).isEqualTo(Duration.ofSeconds(2));
+        assertThat(gauges.refreshInterval(NotificationHandler.QUEUE)).isEqualTo(Duration.ofSeconds(10));
+        assertThat(registry.find("pgmq.queue.length").tag("queue", NotificationHandler.QUEUE).gauge()).isNotNull();
     }
 
     @Autowired

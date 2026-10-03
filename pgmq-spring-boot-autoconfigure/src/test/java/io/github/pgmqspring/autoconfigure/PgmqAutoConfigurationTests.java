@@ -48,6 +48,7 @@ import io.github.pgmqspring.core.consumer.WakeUp;
 import io.github.pgmqspring.core.convert.JacksonPayloadConverter;
 import io.github.pgmqspring.core.convert.PayloadConversionException;
 import io.github.pgmqspring.core.convert.PayloadConverter;
+import io.github.pgmqspring.core.micrometer.PgmqQueueGauges;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assumptions.assumeFalse;
@@ -266,6 +267,22 @@ class PgmqAutoConfigurationTests {
     }
 
     @Test
+    void appliesGaugeRefreshIntervals() {
+        this.runner.withUserConfiguration(MeterRegistryConfiguration.class).withPropertyValues("pgmq.metrics.queues[0]=orders", "pgmq.metrics.queues[1]=payments",
+                "pgmq.metrics.refresh-interval=20s", "pgmq.metrics.refresh-intervals.payments=2s")
+                .run((context) -> {
+                    PgmqQueueGauges gauges = context.getBean(PgmqQueueGauges.class);
+                    assertThat(gauges.refreshInterval("orders")).isEqualTo(Duration.ofSeconds(20));
+                    assertThat(gauges.refreshInterval("payments")).isEqualTo(Duration.ofSeconds(2));
+                });
+        this.runner.withUserConfiguration(MeterRegistryConfiguration.class).withPropertyValues("pgmq.metrics.queues[0]=orders").run((context) -> assertThat(
+                context.getBean(PgmqQueueGauges.class).refreshInterval("orders")).isEqualTo(Duration.ofSeconds(10)));
+        this.runner.withUserConfiguration(MeterRegistryConfiguration.class).withPropertyValues("pgmq.metrics.queues[0]=orders", "pgmq.metrics.refresh-intervals.audit=2s")
+                .run((context) -> assertThat(context).hasFailed().getFailure().rootCause()
+                        .hasMessageContaining("refreshIntervals names queue 'audit'"));
+    }
+
+    @Test
     void rejectsBatchAcknowledgementsWithTransactionalAtStartup() {
         this.runner.withPropertyValues(
                 "pgmq.consumer.batch-acknowledgements=true",
@@ -428,7 +445,7 @@ class PgmqAutoConfigurationTests {
                         "pgmq.metrics.queues[0]=" + queue)
                 .run((context) -> {
                     assertThat(context).hasSingleBean(
-                            io.github.pgmqspring.core.micrometer.PgmqQueueGauges.class);
+                            PgmqQueueGauges.class);
 
                     context.getBean(PgmqTemplate.class).send(queue, "measured");
                     MeterRegistry registry = context.getBean(MeterRegistry.class);

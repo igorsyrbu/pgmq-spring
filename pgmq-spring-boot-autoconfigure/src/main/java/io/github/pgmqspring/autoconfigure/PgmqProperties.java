@@ -676,6 +676,18 @@ public class PgmqProperties {
         /** Queues whose depth and oldest-message age are published as gauges. */
         private List<String> queues = new ArrayList<>();
 
+        /**
+         * Most often a gauged queue re-queries pgmq.metrics(), which scans the queue table; scrapes
+         * in between return the cached values. Must be positive.
+         */
+        private Duration refreshInterval = Duration.ofSeconds(10);
+
+        /**
+         * Per-queue overrides of refresh-interval, for example a small queue whose depth should be
+         * nearly live. Every key must be one of the gauged queues. Must be positive.
+         */
+        private Map<String, Duration> refreshIntervals = new LinkedHashMap<>();
+
         public boolean isEnabled() {
             return this.enabled;
         }
@@ -690,6 +702,22 @@ public class PgmqProperties {
 
         public void setQueues(List<String> queues) {
             this.queues = queues;
+        }
+
+        public Duration getRefreshInterval() {
+            return this.refreshInterval;
+        }
+
+        public void setRefreshInterval(Duration refreshInterval) {
+            this.refreshInterval = refreshInterval;
+        }
+
+        public Map<String, Duration> getRefreshIntervals() {
+            return this.refreshIntervals;
+        }
+
+        public void setRefreshIntervals(Map<String, Duration> refreshIntervals) {
+            this.refreshIntervals = refreshIntervals;
         }
     }
 }
