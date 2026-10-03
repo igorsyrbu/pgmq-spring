@@ -87,6 +87,7 @@ public class PgmqAutoConfiguration {
                 .visibilityTimeout(consumer.getVisibilityTimeout())
                 .pollDelay(consumer.getPollDelay())
                 .maxPollDelay(consumer.getMaxPollDelay())
+                .pollJitter(consumer.getPollJitter())
                 .longPoll(consumer.getLongPoll())
                 .acknowledgeMode(consumer.getAcknowledgeMode())
                 .groupOrdered(consumer.isGroupOrdered())

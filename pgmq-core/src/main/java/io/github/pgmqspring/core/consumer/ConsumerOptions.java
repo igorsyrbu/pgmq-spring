@@ -51,6 +51,8 @@ public final class ConsumerOptions {
 
     private final Duration maxPollDelay;
 
+    private final Duration pollJitter;
+
     private final @Nullable Duration longPoll;
 
     private final boolean groupOrdered;
@@ -89,6 +91,7 @@ public final class ConsumerOptions {
         this.visibilityTimeout = builder.visibilityTimeout;
         this.pollDelay = builder.pollDelay;
         this.maxPollDelay = builder.maxPollDelay;
+        this.pollJitter = builder.pollJitter;
         this.longPoll = builder.longPoll;
         this.groupOrdered = builder.groupOrdered;
         this.groupStrategy = builder.groupStrategy;
@@ -127,6 +130,7 @@ public final class ConsumerOptions {
         builder.visibilityTimeout = this.visibilityTimeout;
         builder.pollDelay = this.pollDelay;
         builder.maxPollDelay = this.maxPollDelay;
+        builder.pollJitter = this.pollJitter;
         builder.longPoll = this.longPoll;
         builder.groupOrdered = this.groupOrdered;
         builder.groupStrategy = this.groupStrategy;
@@ -169,6 +173,10 @@ public final class ConsumerOptions {
 
     public Duration getMaxPollDelay() {
         return this.maxPollDelay;
+    }
+
+    public Duration getPollJitter() {
+        return this.pollJitter;
     }
 
     public @Nullable Duration getLongPoll() {
@@ -280,7 +288,8 @@ public final class ConsumerOptions {
     public String toString() {
         return "ConsumerOptions[concurrency=" + this.concurrency + ", batchSize=" + this.batchSize
                 + ", visibilityTimeout=" + this.visibilityTimeout + ", pollDelay=" + this.pollDelay
-                + ", maxPollDelay=" + this.maxPollDelay + ", longPoll=" + this.longPoll
+                + ", maxPollDelay=" + this.maxPollDelay + ", pollJitter=" + this.pollJitter
+                + ", longPoll=" + this.longPoll
                 + ", groupOrdered=" + this.groupOrdered + ", groupStrategy=" + this.groupStrategy
                 + ", acknowledgeMode=" + this.acknowledgeMode + ", failureAction=" + this.failureAction
                 + ", retryDelay=" + this.retryDelay + ", retryMultiplier=" + this.retryMultiplier
@@ -303,6 +312,8 @@ public final class ConsumerOptions {
         private Duration pollDelay = Duration.ofMillis(200);
 
         private Duration maxPollDelay = Duration.ofSeconds(5);
+
+        private Duration pollJitter = Duration.ZERO;
 
         private @Nullable Duration longPoll;
 
@@ -380,6 +391,18 @@ public final class ConsumerOptions {
          */
         public Builder maxPollDelay(Duration value) {
             this.maxPollDelay = value;
+            return this;
+        }
+
+        /**
+         * Adds a random extra wait, between zero and this, to every sleep after an empty poll and
+         * after a failed poll. Instances started together - after a deploy, or when the database
+         * comes back - otherwise back off on the same schedule and poll in synchronised bursts.
+         * Not applied to empty polls while {@link #longPoll(Duration) long-polling}, where the
+         * database does the waiting. Zero, the default, adds nothing. Must not be negative.
+         */
+        public Builder pollJitter(Duration value) {
+            this.pollJitter = value;
             return this;
         }
 
@@ -588,6 +611,7 @@ public final class ConsumerOptions {
                 throw new IllegalArgumentException("maxPollDelay (" + this.maxPollDelay
                         + ") must not be shorter than pollDelay (" + this.pollDelay + ")");
             }
+            requireNonNegative(this.pollJitter, "pollJitter");
             if (this.longPoll != null && this.longPoll.compareTo(Duration.ofSeconds(1)) < 0) {
                 // read_with_poll takes whole seconds; anything shorter would silently become 0.
                 throw new IllegalArgumentException("longPoll must be at least 1s, or unset, but was " + this.longPoll);

@@ -46,6 +46,10 @@ public class ReadingConsumerConfiguration {
                         // Up to 50 messages per poll, all handed to the handler in one call.
                         .batchSize(50)
                         .concurrency(2)
+                        // Up to 100ms of random extra wait after an empty poll, so the two polling
+                        // loops - and other instances started at the same time - drift apart
+                        // instead of polling in lockstep.
+                        .pollJitter(Duration.ofMillis(100))
                         // The multi-row insert and the batch acknowledgement (one delete for all
                         // ids) commit together.
                         .transactional(true)

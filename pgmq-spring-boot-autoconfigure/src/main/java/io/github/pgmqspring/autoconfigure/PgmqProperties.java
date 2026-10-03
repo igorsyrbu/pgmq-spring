@@ -227,6 +227,13 @@ public class PgmqProperties {
         private Duration maxPollDelay = Duration.ofSeconds(5);
 
         /**
+         * Random extra wait, between zero and this, added to every sleep after an empty or failed
+         * poll, so instances started together do not poll in synchronised bursts. Not applied to
+         * empty polls while long-polling. Zero adds nothing. Must not be negative.
+         */
+        private Duration pollJitter = Duration.ZERO;
+
+        /**
          * When set, waits inside the database for up to this long instead of polling. Holds one
          * JDBC connection per concurrent consumer for the whole window, so size the pool for at
          * least concurrency connections plus the application's own needs. At least 1s when set.
@@ -370,6 +377,14 @@ public class PgmqProperties {
 
         public void setMaxPollDelay(Duration maxPollDelay) {
             this.maxPollDelay = maxPollDelay;
+        }
+
+        public Duration getPollJitter() {
+            return this.pollJitter;
+        }
+
+        public void setPollJitter(Duration pollJitter) {
+            this.pollJitter = pollJitter;
         }
 
         public @Nullable Duration getLongPoll() {

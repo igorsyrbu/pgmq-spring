@@ -10,6 +10,9 @@ The quickstart in batches: **many messages per send, many messages per handler c
 - **Batch consumption.** A container with `batchHandler(...)` and `batchSize(50)` hands up to 50
   messages to one call, which writes them with one multi-row insert. The insert and the
   acknowledgement (one delete for every id) commit together.
+- **Spreading the polls.** `pollJitter(100ms)` adds a random extra wait after every empty poll,
+  so the two polling loops - and other instances deployed at the same time - do not hit the
+  database in synchronised bursts.
 - **The two rules of a batch handler.** A batch is retried and dead-lettered *as a whole*, so:
   - **be idempotent** - every message in a redelivered batch is seen again;
   - **throw only for problems a retry can fix.** An invalid reading is recorded as rejected

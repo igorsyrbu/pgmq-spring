@@ -182,6 +182,13 @@ class PgmqAutoConfigurationTests {
     }
 
     @Test
+    void bindsPollJitter() {
+        this.runner.withPropertyValues("pgmq.consumer.poll-jitter=150ms").run((context) -> assertThat(
+                context.getBean(ConsumerOptions.class).getPollJitter()).isEqualTo(Duration.ofMillis(150)));
+        this.runner.run((context) -> assertThat(context.getBean(ConsumerOptions.class).getPollJitter()).isZero());
+    }
+
+    @Test
     void rejectsBatchAcknowledgementsWithTransactionalAtStartup() {
         this.runner.withPropertyValues(
                 "pgmq.consumer.batch-acknowledgements=true",

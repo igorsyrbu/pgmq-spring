@@ -31,9 +31,11 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.random.RandomGenerator;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -476,7 +478,7 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
                 }
                 safely(() -> this.listener.onPolled(this.queue, batch));
                 if (batch.isEmpty()) {
-                    sleep(backoff);
+                    sleep(this.options.getLongPoll() != null ? backoff : withJitter(backoff));
                     backoff = nextBackoff(backoff);
                     continue;
                 }
@@ -507,7 +509,7 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
                     // An outage fails every poll of every loop; one stack trace per outage is enough.
                     logger.warn(message + " (" + consecutiveFailures + " consecutive failures, latest: " + ex + ")");
                 }
-                sleep(this.options.getMaxPollDelay());
+                sleep(withJitter(this.options.getMaxPollDelay()));
             }
         }
     }
@@ -938,6 +940,19 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
     private Duration nextBackoff(Duration current) {
         Duration doubled = current.multipliedBy(2);
         return doubled.compareTo(this.options.getMaxPollDelay()) > 0 ? this.options.getMaxPollDelay() : doubled;
+    }
+
+    private Duration withJitter(Duration base) {
+        return jittered(base, this.options.getPollJitter(), ThreadLocalRandom.current());
+    }
+
+    /** {@code base} plus a uniformly random extra wait between zero and {@code jitter}, inclusive. */
+    static Duration jittered(Duration base, Duration jitter, RandomGenerator random) {
+        long jitterMillis = jitter.toMillis();
+        if (jitterMillis <= 0) {
+            return base;
+        }
+        return base.plusMillis(random.nextLong(jitterMillis + 1));
     }
 
     private static void sleep(Duration duration) {
