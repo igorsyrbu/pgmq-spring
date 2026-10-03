@@ -56,11 +56,35 @@ dependency version.
    ```
 
 3. Optionally, create a GitHub release for the tag (**Releases → Draft a new release**) to publish
-   notes. JitPack only needs the tag.
+   [release notes](#writing-release-notes). JitPack only needs the tag.
 4. Open [the pgmq-spring page on JitPack](https://jitpack.io/#igorsyrbu/pgmq-spring), find the tag
    and click **Get it**. That starts
    the build; the log is linked from the same page. Without this step, the first dependency request
    triggers the build instead, and waits for it.
+
+### Writing release notes
+
+Use GitHub Releases as the changelog. Set the title to the version and a short summary, such as
+`0.2.0 — Consumer configuration and performance improvements`.
+
+Review the commits and documentation changes between the previous tag and the release tag
+(`git log --oneline 0.1.0..0.2.0`, for example). Describe user-visible changes in short bullets,
+using only the sections that apply:
+
+- **Added:** new features and configuration options.
+- **Fixed:** corrected behaviour.
+- **Breaking changes:** changed defaults or APIs, with concrete migration instructions.
+- **Notes:** delivery semantics, requirements or limitations users should know about.
+- **Installation:** the dependency coordinate with the release version and a link to the tagged
+  README's quickstart.
+
+For later releases, add a **Full changelog** link, for example
+`https://github.com/igorsyrbu/pgmq-spring/compare/0.1.0...0.2.0`. For the initial release, summarize
+the features and requirements present at its tag instead.
+
+In the GitHub release form, select the release tag and previous tag, paste the notes, then publish
+or save a draft. **Generate release notes** mainly summarizes merged pull requests; review and
+supplement it for changes pushed directly.
 
 ### Using a release
 
