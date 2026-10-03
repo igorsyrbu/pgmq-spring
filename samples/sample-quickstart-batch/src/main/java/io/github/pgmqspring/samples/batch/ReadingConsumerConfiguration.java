@@ -25,6 +25,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.transaction.PlatformTransactionManager;
 
 import io.github.pgmqspring.core.client.PgmqOperations;
+import io.github.pgmqspring.core.consumer.ConsumeMode;
 import io.github.pgmqspring.core.consumer.ConsumerOptions;
 import io.github.pgmqspring.core.consumer.FailureAction;
 import io.github.pgmqspring.core.consumer.PgmqMessageListenerContainer;
@@ -50,11 +51,13 @@ public class ReadingConsumerConfiguration {
                         // loops - and other instances started at the same time - drift apart
                         // instead of polling in lockstep.
                         .pollJitter(Duration.ofMillis(100))
-                        // The multi-row insert and the batch acknowledgement (one delete for all
-                        // ids) commit together.
+                        // The batch is popped inside the handler's transaction: the multi-row insert
+                        // and the removal of every message commit together, in one statement per
+                        // batch rather than a read and a delete.
+                        .consumeMode(ConsumeMode.TRANSACTIONAL_POP)
                         .transactional(true)
-                        // The lease starts at the read and covers the whole batch.
-                        .visibilityTimeout(Duration.ofSeconds(30))
+                        // No lease expires to free a stuck batch, so the transaction does.
+                        .transactionTimeout(Duration.ofSeconds(30))
                         .maxAttempts(3)
                         .retryDelay(Duration.ofSeconds(1))
                         .failureAction(FailureAction.DEAD_LETTER)

@@ -93,6 +93,7 @@ public class PgmqAutoConfiguration {
                 .pollJitter(consumer.getPollJitter())
                 .longPoll(consumer.getLongPoll())
                 .wakeUp(consumer.getWakeUp())
+                .consumeMode(consumer.getConsumeMode())
                 .acknowledgeMode(consumer.getAcknowledgeMode())
                 .groupOrdered(consumer.isGroupOrdered())
                 .groupStrategy(consumer.getGroupStrategy())

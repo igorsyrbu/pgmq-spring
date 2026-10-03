@@ -577,14 +577,13 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
                     this.wakeUp.await(this.options.getPollDelay(), seen);
                     continue;
                 }
-                List<PgmqMessage<String>> batch = poll();
+                boolean found = consume();
                 if (consecutiveFailures > 0) {
                     logger.info("PGMQ poll loop for queue '" + this.queue + "' recovered after " + consecutiveFailures
                             + " failed poll(s)");
                     consecutiveFailures = 0;
                 }
-                safely(() -> this.listener.onPolled(this.queue, batch));
-                if (batch.isEmpty()) {
+                if (!found) {
                     Duration wait = this.options.getLongPoll() != null ? backoff : withJitter(backoff);
                     // After a wake-up, back off from the start again: polling briefly at short
                     // intervals also finds messages whose notification PGMQ throttled away.
@@ -592,16 +591,6 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
                     continue;
                 }
                 backoff = this.options.getPollDelay();
-                if (this.paused.get() || !this.running.get()) {
-                    // A poll that was already in flight when pause() or stop() was called must not
-                    // start work. Hand the messages straight back rather than holding their lease
-                    // until it lapses.
-                    release(batch, Lease.NONE);
-                    continue;
-                }
-                try (Lease lease = openLease(batch)) {
-                    dispatch(batch, lease);
-                }
             }
             catch (Throwable ex) {
                 // The invariant: on any unexpected failure we touch nothing, so whatever was read
@@ -623,7 +612,37 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
         }
     }
 
+    /** Polls once and handles what the poll returned; whether it returned anything. */
+    private boolean consume() {
+        if (this.options.getConsumeMode() == ConsumeMode.TRANSACTIONAL_POP) {
+            return popInTransaction();
+        }
+        List<PgmqMessage<String>> batch = poll();
+        safely(() -> this.listener.onPolled(this.queue, batch));
+        if (batch.isEmpty()) {
+            return false;
+        }
+        if (this.options.getConsumeMode() == ConsumeMode.POP) {
+            dispatchPopped(batch);
+            return true;
+        }
+        if (this.paused.get() || !this.running.get()) {
+            // A poll that was already in flight when pause() or stop() was called must not
+            // start work. Hand the messages straight back rather than holding their lease
+            // until it lapses.
+            release(batch, Lease.NONE);
+            return true;
+        }
+        try (Lease lease = openLease(batch)) {
+            dispatch(batch, lease);
+        }
+        return true;
+    }
+
     private List<PgmqMessage<String>> poll() {
+        if (this.options.getConsumeMode() == ConsumeMode.POP) {
+            return this.pgmq.pop(this.queue, this.options.getBatchSize(), String.class);
+        }
         ReadOptions readOptions = ReadOptions.defaults()
                 .batchSize(this.options.getBatchSize())
                 .visibilityTimeout(this.options.getVisibilityTimeout());
@@ -786,6 +805,183 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
         }
     }
 
+    // ---------------------------------------------------------------------
+    // Pop modes
+    // ---------------------------------------------------------------------
+
+    /**
+     * {@link ConsumeMode#TRANSACTIONAL_POP}: pops and handles in one transaction, so the message is
+     * removed exactly when the handler's writes commit. A single-message handler gets one message
+     * per transaction, because a popped batch cannot be partly rolled back.
+     *
+     * <p>A popped message that cannot be delivered - poison, or a payload that does not convert -
+     * rolls the whole transaction back. Its row is then restored, and it is retried, archived or
+     * dead-lettered exactly as in read mode; a deleted row could not be archived.
+     */
+    private boolean popInTransaction() {
+        int count = this.batchHandler != null ? this.options.getBatchSize() : 1;
+        PoppedBatch<T> popped = new PoppedBatch<>();
+        try {
+            requireTransactionTemplate().executeWithoutResult((status) -> {
+                popped.messages = this.pgmq.pop(this.queue, count, String.class).stream()
+                        .map(PgmqMessageListenerContainer::asAttempt)
+                        .toList();
+                if (popped.messages.isEmpty()) {
+                    return;
+                }
+                if (this.paused.get() || !this.running.get()) {
+                    // In flight when pause() or stop() was called: the rollback hands them back.
+                    status.setRollbackOnly();
+                    return;
+                }
+                for (PgmqMessage<String> raw : popped.messages) {
+                    if (isPoison(raw)) {
+                        popped.undeliverable.put(raw, null);
+                        continue;
+                    }
+                    try {
+                        popped.deliverable.add(this.pgmq.convert(raw, this.payloadType));
+                    }
+                    catch (RuntimeException ex) {
+                        popped.undeliverable.put(raw, ex);
+                    }
+                }
+                if (!popped.undeliverable.isEmpty()) {
+                    status.setRollbackOnly();
+                    return;
+                }
+                popped.startedAt = Instant.now();
+                invokeHandlerOnPopped(popped.deliverable);
+            });
+        }
+        catch (RuntimeException | Error ex) {
+            if (popped.startedAt == null) {
+                // The pop itself failed: a poll error, and nothing was taken.
+                throw ex;
+            }
+            safely(() -> this.listener.onPolled(this.queue, popped.messages));
+            onPoppedHandlerFailure(popped, ex);
+            return true;
+        }
+        List<PgmqMessage<String>> messages = popped.messages;
+        safely(() -> this.listener.onPolled(this.queue, messages));
+        if (messages.isEmpty()) {
+            return false;
+        }
+        popped.undeliverable.forEach((raw, error) -> withMdc(raw, () -> {
+            if (error == null) {
+                handlePoison(raw, Lease.NONE);
+            }
+            else {
+                onUnconvertible(raw, error, Lease.NONE);
+            }
+        }));
+        Instant startedAt = popped.startedAt;
+        if (startedAt != null) {
+            Duration took = Duration.between(startedAt, Instant.now());
+            popped.deliverable.forEach((message) -> safely(() -> this.listener.onSuccess(this.queue, message, took)));
+        }
+        return true;
+    }
+
+    private void invokeHandlerOnPopped(List<PgmqMessage<T>> deliverable) {
+        PgmqBatchMessageHandler<T> handler = this.batchHandler;
+        if (handler != null) {
+            String previousQueue = MdcSupport.get(MDC_QUEUE);
+            MdcSupport.put(MDC_QUEUE, this.queue);
+            try {
+                invokeBatchHandler(handler, deliverable);
+            }
+            finally {
+                restore(MDC_QUEUE, previousQueue);
+            }
+            return;
+        }
+        PgmqMessage<T> message = deliverable.get(0);
+        withMdc(message, () -> invokeHandler(message, new DefaultAcknowledgement(message, Lease.NONE)));
+    }
+
+    private void onPoppedHandlerFailure(PoppedBatch<T> popped, Throwable error) {
+        Instant startedAt = popped.startedAt;
+        Duration took = startedAt != null ? Duration.between(startedAt, Instant.now()) : Duration.ZERO;
+        logger.warn("Handler failed for " + popped.deliverable.size() + " popped message(s) on queue '" + this.queue
+                + "'; the transaction rolled back", error);
+        for (PgmqMessage<T> message : popped.deliverable) {
+            safely(() -> this.listener.onFailure(this.queue, message, took, error));
+            withMdc(message, () -> applyFailureAction(message, error, Lease.NONE));
+        }
+    }
+
+    /**
+     * A popped message's {@code read_ct} counts its earlier failed attempts, not this delivery:
+     * {@code pop} does not increment it. Adding this attempt gives it the meaning it has in read
+     * mode, so {@code maxAttempts}, poison handling and the read count handlers see all agree.
+     */
+    private static PgmqMessage<String> asAttempt(PgmqMessage<String> popped) {
+        return new PgmqMessage<>(popped.id(), popped.readCount() + 1, popped.enqueuedAt(), popped.lastReadAt(),
+                popped.visibleAt(), popped.headers(), popped.payload(), popped.rawPayload(), popped.queueName());
+    }
+
+    /**
+     * {@link ConsumeMode#POP}: the poll has already deleted these messages, so they are handled
+     * even while pausing or stopping, and a failure loses them - which is what at-most-once means.
+     */
+    private void dispatchPopped(List<PgmqMessage<String>> batch) {
+        PgmqBatchMessageHandler<T> handler = this.batchHandler;
+        if (handler != null) {
+            List<PgmqMessage<T>> deliverable = new ArrayList<>();
+            for (PgmqMessage<String> raw : batch) {
+                try {
+                    deliverable.add(this.pgmq.convert(raw, this.payloadType));
+                }
+                catch (RuntimeException ex) {
+                    lost(raw, ex, Duration.ZERO);
+                }
+            }
+            if (deliverable.isEmpty()) {
+                return;
+            }
+            Instant startedAt = Instant.now();
+            try {
+                invokeHandlerOnPopped(deliverable);
+                Duration took = Duration.between(startedAt, Instant.now());
+                deliverable.forEach((message) -> safely(() -> this.listener.onSuccess(this.queue, message, took)));
+            }
+            catch (Throwable ex) {
+                Duration took = Duration.between(startedAt, Instant.now());
+                deliverable.forEach((message) -> lost(message, ex, took));
+            }
+            return;
+        }
+        for (PgmqMessage<String> raw : batch) {
+            withMdc(raw, () -> {
+                PgmqMessage<T> message;
+                try {
+                    message = this.pgmq.convert(raw, this.payloadType);
+                }
+                catch (RuntimeException ex) {
+                    lost(raw, ex, Duration.ZERO);
+                    return;
+                }
+                Instant startedAt = Instant.now();
+                try {
+                    invokeHandler(message, new DefaultAcknowledgement(message, Lease.NONE));
+                    Duration took = Duration.between(startedAt, Instant.now());
+                    safely(() -> this.listener.onSuccess(this.queue, message, took));
+                }
+                catch (Throwable ex) {
+                    lost(message, ex, Duration.between(startedAt, Instant.now()));
+                }
+            });
+        }
+    }
+
+    private void lost(PgmqMessage<?> message, Throwable error, Duration took) {
+        safely(() -> this.listener.onFailure(this.queue, message, took, error));
+        logger.error("Message " + message.id() + " on queue '" + this.queue + "' failed and is lost: "
+                + "consumeMode=POP removed it before it was handled", error);
+    }
+
     /**
      * A payload that cannot be converted to the container's payload type is a failure of that one
      * message, handled exactly like a handler that threw: it is retried, counts towards
@@ -910,6 +1106,12 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
         try {
             if (!exhausted) {
                 Duration delay = this.options.retryDelayAfter(message.readCount());
+                if (this.options.getConsumeMode() == ConsumeMode.TRANSACTIONAL_POP) {
+                    // The rollback left the message uncounted and visible at once, even with no delay.
+                    this.pgmq.retryAfterRollback(this.queue, message.id(), delay);
+                    scheduleWakeUp(delay);
+                    return;
+                }
                 if (!delay.isZero() && !delay.isNegative()) {
                     this.pgmq.setVisibilityTimeout(this.queue, message.id(), delay);
                     scheduleWakeUp(delay);
@@ -1255,6 +1457,20 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
         }
     }
 
+    /** What one transactional pop took and how far it got, kept outside the transaction for the failure path. */
+    private static final class PoppedBatch<T> {
+
+        private List<PgmqMessage<String>> messages = List.of();
+
+        private final List<PgmqMessage<T>> deliverable = new ArrayList<>();
+
+        /** Messages that cannot be handed to the handler, with the conversion error or {@code null} if poison. */
+        private final Map<PgmqMessage<String>, @Nullable Throwable> undeliverable = new LinkedHashMap<>();
+
+        /** When the handler was invoked; {@code null} until then. */
+        private @Nullable Instant startedAt;
+    }
+
     /** Default {@link Acknowledgement}, recording which terminal action the handler chose. */
     private final class DefaultAcknowledgement implements Acknowledgement {
 
@@ -1349,6 +1565,8 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
 
         private @Nullable DataSource notificationDataSource;
 
+        private boolean acknowledging;
+
         private Builder(PgmqOperations pgmq, String queue, Class<T> payloadType) {
             this.pgmq = pgmq;
             this.queue = queue;
@@ -1363,6 +1581,7 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
         /** Handles one message at a time. */
         public Builder<T> handler(PgmqMessageHandler<T> value) {
             this.messageHandler = (message, acknowledgement) -> value.handle(message);
+            this.acknowledging = false;
             return this;
         }
 
@@ -1375,6 +1594,7 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
          */
         public Builder<T> acknowledgingHandler(PgmqAcknowledgingMessageHandler<T> value) {
             this.messageHandler = value;
+            this.acknowledging = true;
             return this;
         }
 
@@ -1422,6 +1642,12 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
             }
             if (this.messageHandler != null && this.batchHandler != null) {
                 throw new IllegalArgumentException("set either handler or batchHandler, not both");
+            }
+            if (this.acknowledging && this.messageHandler != null
+                    && this.options.getConsumeMode() != ConsumeMode.READ) {
+                throw new IllegalArgumentException("consumeMode=" + this.options.getConsumeMode() + " cannot be "
+                        + "combined with an acknowledgingHandler: a popped message is removed by the pop, so there is "
+                        + "nothing left to acknowledge, archive or retry. Use handler(...) instead.");
             }
             if (this.batchHandler != null && this.options.getAcknowledgeMode() == AcknowledgeMode.MANUAL) {
                 // A batch handler is given no Acknowledgement, so MANUAL would mean nothing is

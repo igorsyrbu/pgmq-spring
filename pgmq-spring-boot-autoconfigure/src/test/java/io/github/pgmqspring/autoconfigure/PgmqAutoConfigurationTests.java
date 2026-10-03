@@ -42,6 +42,7 @@ import io.github.pgmqspring.core.UnsupportedPgmqFeatureException;
 import io.github.pgmqspring.core.client.PgmqOperations;
 import io.github.pgmqspring.core.client.PgmqTemplate;
 import io.github.pgmqspring.core.consumer.AcknowledgeMode;
+import io.github.pgmqspring.core.consumer.ConsumeMode;
 import io.github.pgmqspring.core.consumer.ConsumerOptions;
 import io.github.pgmqspring.core.consumer.FailureAction;
 import io.github.pgmqspring.core.consumer.WakeUp;
@@ -280,6 +281,18 @@ class PgmqAutoConfigurationTests {
         this.runner.withUserConfiguration(MeterRegistryConfiguration.class).withPropertyValues("pgmq.metrics.queues[0]=orders", "pgmq.metrics.refresh-intervals.audit=2s")
                 .run((context) -> assertThat(context).hasFailed().getFailure().rootCause()
                         .hasMessageContaining("refreshIntervals names queue 'audit'"));
+    }
+
+    @Test
+    void bindsConsumeMode() {
+        this.runner.withPropertyValues("pgmq.consumer.consume-mode=transactional-pop", "pgmq.consumer.transactional=true")
+                .run((context) -> assertThat(context.getBean(ConsumerOptions.class).getConsumeMode())
+                        .isEqualTo(ConsumeMode.TRANSACTIONAL_POP));
+        this.runner.withPropertyValues("pgmq.consumer.consume-mode=transactional-pop")
+                .run((context) -> assertThat(context).hasFailed().getFailure().rootCause()
+                        .hasMessageContaining("requires transactional=true"));
+        this.runner.run((context) -> assertThat(context.getBean(ConsumerOptions.class).getConsumeMode())
+                .isEqualTo(ConsumeMode.READ));
     }
 
     @Test

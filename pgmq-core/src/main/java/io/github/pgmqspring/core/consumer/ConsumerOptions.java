@@ -57,6 +57,8 @@ public final class ConsumerOptions {
 
     private final WakeUp wakeUp;
 
+    private final ConsumeMode consumeMode;
+
     private final boolean groupOrdered;
 
     private final GroupReadStrategy groupStrategy;
@@ -98,6 +100,7 @@ public final class ConsumerOptions {
         this.pollJitter = builder.pollJitter;
         this.longPoll = builder.longPoll;
         this.wakeUp = builder.wakeUp;
+        this.consumeMode = builder.consumeMode;
         this.groupOrdered = builder.groupOrdered;
         this.groupStrategy = builder.groupStrategy;
         this.acknowledgeMode = builder.acknowledgeMode;
@@ -139,6 +142,7 @@ public final class ConsumerOptions {
         builder.pollJitter = this.pollJitter;
         builder.longPoll = this.longPoll;
         builder.wakeUp = this.wakeUp;
+        builder.consumeMode = this.consumeMode;
         builder.groupOrdered = this.groupOrdered;
         builder.groupStrategy = this.groupStrategy;
         builder.acknowledgeMode = this.acknowledgeMode;
@@ -193,6 +197,10 @@ public final class ConsumerOptions {
 
     public WakeUp getWakeUp() {
         return this.wakeUp;
+    }
+
+    public ConsumeMode getConsumeMode() {
+        return this.consumeMode;
     }
 
     /**
@@ -305,7 +313,7 @@ public final class ConsumerOptions {
         return "ConsumerOptions[concurrency=" + this.concurrency + ", batchSize=" + this.batchSize
                 + ", visibilityTimeout=" + this.visibilityTimeout + ", pollDelay=" + this.pollDelay
                 + ", maxPollDelay=" + this.maxPollDelay + ", pollJitter=" + this.pollJitter
-                + ", longPoll=" + this.longPoll + ", wakeUp=" + this.wakeUp
+                + ", longPoll=" + this.longPoll + ", wakeUp=" + this.wakeUp + ", consumeMode=" + this.consumeMode
                 + ", groupOrdered=" + this.groupOrdered + ", groupStrategy=" + this.groupStrategy
                 + ", acknowledgeMode=" + this.acknowledgeMode + ", failureAction=" + this.failureAction
                 + ", retryDelay=" + this.retryDelay + ", retryMultiplier=" + this.retryMultiplier
@@ -335,6 +343,8 @@ public final class ConsumerOptions {
         private @Nullable Duration longPoll;
 
         private WakeUp wakeUp = WakeUp.POLL;
+
+        private ConsumeMode consumeMode = ConsumeMode.READ;
 
         private boolean groupOrdered;
 
@@ -455,6 +465,31 @@ public final class ConsumerOptions {
          */
         public Builder wakeUp(WakeUp value) {
             this.wakeUp = value;
+            return this;
+        }
+
+        /**
+         * How messages are taken off the queue; defaults to {@link ConsumeMode#READ}.
+         *
+         * <p>{@link ConsumeMode#TRANSACTIONAL_POP} halves the writes per message. It requires
+         * {@link #transactional(boolean)}, and works best with a
+         * {@link #transactionTimeout(Duration)}, since no lease expires to free a hung handler's
+         * message. A failed attempt rolls back, then one statement counts it in {@code read_ct}
+         * and applies the retry delay, so attempts survive restarts as in read mode - but a
+         * handler that kills the JVM is never counted, and is retried for ever. A batch handler
+         * pops a whole batch per transaction; a single-message handler pops one message.
+         *
+         * <p>{@link ConsumeMode#POP} is at-most-once: a failed message is lost, so it cannot be
+         * combined with {@link #transactional(boolean)} or a terminal failure action.
+         *
+         * <p>Both pop modes require {@link AcknowledgeMode#DELETE}, and cannot be combined with
+         * {@link #groupOrdered(boolean)} - {@code pop} ignores FIFO groups - nor with
+         * {@link #longPoll(Duration)}, {@link #extendLease(boolean)} or
+         * {@link #batchAcknowledgements(boolean)}, which have nothing to act on. An acknowledging
+         * handler is rejected for the same reason.
+         */
+        public Builder consumeMode(ConsumeMode value) {
+            this.consumeMode = value;
             return this;
         }
 
@@ -684,10 +719,11 @@ public final class ConsumerOptions {
             }
             requireNonNegative(this.shutdownTimeout, "shutdownTimeout");
             if (this.groupStrategy == null || this.acknowledgeMode == null || this.failureAction == null
-                    || this.wakeUp == null) {
+                    || this.wakeUp == null || this.consumeMode == null) {
                 throw new IllegalArgumentException(
-                        "groupStrategy, acknowledgeMode, failureAction and wakeUp must not be null");
+                        "groupStrategy, acknowledgeMode, failureAction, wakeUp and consumeMode must not be null");
             }
+            validateConsumeMode();
             if (this.wakeUp == WakeUp.NOTIFY && this.longPoll != null) {
                 throw new IllegalArgumentException("wakeUp=NOTIFY cannot be combined with longPoll: both replace "
                         + "empty-queue polling, and a long poll would hold its connection through every notification");
@@ -734,6 +770,34 @@ public final class ConsumerOptions {
                         + "acknowledgeMode=MANUAL, where the handler acknowledges each message itself");
             }
             return new ConsumerOptions(this);
+        }
+
+        private void validateConsumeMode() {
+            if (this.consumeMode == ConsumeMode.READ) {
+                return;
+            }
+            String mode = "consumeMode=" + this.consumeMode;
+            rejectWith(this.groupOrdered, mode + " cannot be combined with groupOrdered: pop ignores FIFO groups");
+            rejectWith(this.longPoll != null, mode + " cannot be combined with longPoll: PGMQ has no long-polling pop");
+            rejectWith(this.extendLease, mode + " cannot be combined with extendLease: a popped message has no lease");
+            rejectWith(this.batchAcknowledgements,
+                    mode + " cannot be combined with batchAcknowledgements: pop already removes the message");
+            rejectWith(this.acknowledgeMode != AcknowledgeMode.DELETE,
+                    mode + " requires acknowledgeMode=DELETE: pop deletes the message");
+            if (this.consumeMode == ConsumeMode.TRANSACTIONAL_POP) {
+                rejectWith(!this.transactional, mode + " requires transactional=true");
+                return;
+            }
+            rejectWith(this.transactional, mode + " cannot be combined with transactional: pop removes the message "
+                    + "before the handler runs; use TRANSACTIONAL_POP to remove it when the handler commits");
+            rejectWith(this.failureAction != FailureAction.REDELIVER, mode + " cannot apply failureAction="
+                    + this.failureAction + ": a popped message whose handler fails is already gone");
+        }
+
+        private static void rejectWith(boolean invalid, String message) {
+            if (invalid) {
+                throw new IllegalArgumentException(message);
+            }
         }
 
         private static void requirePositive(@Nullable Duration value, String name) {

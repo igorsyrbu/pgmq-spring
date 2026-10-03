@@ -10,8 +10,12 @@ The quickstart in batches: **many messages per send, many messages per handler c
   `pgmq.producer.max-batch-size` (500 here) is split into several statements, still in that one
   transaction.
 - **Batch consumption.** A container with `batchHandler(...)` and `batchSize(50)` hands up to 50
-  messages to one call, which writes them with one multi-row insert. The insert and the
-  acknowledgement (one delete for every id) commit together.
+  messages to one call, which writes them with one multi-row insert.
+- **Transactional pop.** With `consumeMode(TRANSACTIONAL_POP)` the container pops the batch
+  inside the handler's transaction: the insert and the removal of every message commit together,
+  in one statement per batch instead of a read and a delete, and a failed batch rolls back and is
+  retried with its attempts counted. A `transactionTimeout` frees a stuck batch, since no lease
+  expires.
 - **Spreading the polls.** `pollJitter(100ms)` adds a random extra wait after every empty poll,
   so the two polling loops - and other instances deployed at the same time - do not hit the
   database in synchronised bursts.
@@ -48,7 +52,7 @@ Pass `--args='--sample.demo.enabled=false'` to start it without the demo data.
 |---|---|
 | [`ReadingService`](src/main/java/io/github/pgmqspring/samples/batch/ReadingService.java) | `@Transactional` - the ingestion row and `sendBatch` are one Postgres transaction |
 | [`ReadingBatchHandler`](src/main/java/io/github/pgmqspring/samples/batch/ReadingBatchHandler.java) | One call per batch; idempotent multi-row insert; rejects instead of throwing |
-| [`ReadingConsumerConfiguration`](src/main/java/io/github/pgmqspring/samples/batch/ReadingConsumerConfiguration.java) | `batchHandler(...)` and `batchSize(50)` - the only differences from the single-message container |
+| [`ReadingConsumerConfiguration`](src/main/java/io/github/pgmqspring/samples/batch/ReadingConsumerConfiguration.java) | `batchHandler(...)` and `batchSize(50)`, plus a transactional pop |
 | [`application.yaml`](src/main/resources/application.yaml) | A datasource, two queue names and the largest batch per statement |
 
 ## Variations

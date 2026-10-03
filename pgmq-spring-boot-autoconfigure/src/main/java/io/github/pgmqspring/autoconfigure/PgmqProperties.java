@@ -30,6 +30,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import io.github.pgmqspring.core.QueueKind;
 import io.github.pgmqspring.core.client.GroupReadStrategy;
 import io.github.pgmqspring.core.consumer.AcknowledgeMode;
+import io.github.pgmqspring.core.consumer.ConsumeMode;
 import io.github.pgmqspring.core.consumer.FailureAction;
 import io.github.pgmqspring.core.consumer.WakeUp;
 
@@ -325,6 +326,17 @@ public class PgmqProperties {
         private WakeUp wakeUp = WakeUp.POLL;
 
         /**
+         * How messages are taken off the queue. READ leases them and acknowledges after the
+         * handler: at-least-once, two writes per message. TRANSACTIONAL_POP pops them inside the
+         * handler's transaction, removing each exactly when the handler commits, with one write
+         * per message; requires transactional, and works best with transaction-timeout. POP pops
+         * them before the handler runs: at-most-once, a failed message is lost. Both pop modes
+         * need acknowledge-mode=delete and rule out group-ordered, long-poll, extend-lease and
+         * batch-acknowledgements.
+         */
+        private ConsumeMode consumeMode = ConsumeMode.READ;
+
+        /**
          * What to do with a message after its handler returns normally: DELETE it, ARCHIVE it, or
          * leave it to the handler (MANUAL, single-message acknowledging handlers only).
          */
@@ -485,6 +497,14 @@ public class PgmqProperties {
 
         public void setLongPoll(@Nullable Duration longPoll) {
             this.longPoll = longPoll;
+        }
+
+        public ConsumeMode getConsumeMode() {
+            return this.consumeMode;
+        }
+
+        public void setConsumeMode(ConsumeMode consumeMode) {
+            this.consumeMode = consumeMode;
         }
 
         public WakeUp getWakeUp() {

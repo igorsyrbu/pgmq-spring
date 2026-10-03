@@ -229,6 +229,23 @@ a `compileOnly` dependency, checked when a `NOTIFY` container is built. Queue na
 `enable_notify_insert` lower-cased, because PGMQ stores the name as given but its trigger looks the
 throttle up by the lower-cased table name, so a mixed-case name would never notify.
 
+### Transactional pop counts attempts in the row
+
+`TRANSACTIONAL_POP` pops inside the handler's transaction, which halves the writes per message but
+loses what a read provides: `pop` does not increment `read_ct`, and a rollback restores the row
+exactly as it was - uncounted and visible at once. Counting attempts in memory was rejected: the
+count would reset on restart, differ per instance, and grow with messages other instances popped.
+Instead, after a rolled-back attempt one statement - `PgmqOperations.retryAfterRollback`, an
+`update` of the queue's table, since PGMQ has no function for it - increments `read_ct` and sets
+the retry delay, leaving the row as a failed read would have. Every popped message's read count
+is presented as `read_ct + 1`, the attempt in progress, so `maxAttempts`, poison detection,
+retry backoff and the read count handlers see mean what they do in read mode. A message that
+cannot be delivered - poison, or a payload that does not convert - rolls the whole transaction
+back too, so that it can be retried, archived or dead-lettered on its restored row: a popped row
+cannot be passed to `pgmq.archive`. What cannot be counted is a handler that kills the JVM before
+the rollback; that message is retried for ever. `pop` takes its rows `FOR UPDATE SKIP LOCKED` on
+every supported version, so an uncommitted pop is skipped by every other consumer.
+
 ### Leases cover the batch
 
 With `extendLease`, one lease covers every message of a polled batch from the read until each is

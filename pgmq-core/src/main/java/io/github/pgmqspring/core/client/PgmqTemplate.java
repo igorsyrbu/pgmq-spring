@@ -846,6 +846,24 @@ public class PgmqTemplate implements PgmqOperations {
         }
     }
 
+    @Override
+    public void retryAfterRollback(String queue, long messageId, Duration delay) {
+        QueueNames.validate(queue);
+        String sql = "update " + queueTable(queue) + " set read_ct = read_ct + 1, "
+                + "vt = clock_timestamp() + ?::integer * interval '1 second' where msg_id = ?::bigint";
+        try {
+            this.jdbcTemplate.update(sql, seconds(delay), messageId);
+        }
+        catch (DataAccessException ex) {
+            throw translate(queue, ex);
+        }
+    }
+
+    /** The queue's own table as a quoted identifier, named the way {@code pgmq.format_table_name} does. */
+    private static String queueTable(String queue) {
+        return "pgmq.\"q_" + QueueNames.normalize(queue).replace("\"", "\"\"") + "\"";
+    }
+
     // ---------------------------------------------------------------------
     // Capabilities
     // ---------------------------------------------------------------------

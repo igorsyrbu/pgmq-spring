@@ -329,6 +329,18 @@ public interface PgmqOperations {
     /** Makes several messages invisible until a specific instant. */
     void setVisibleAt(String queue, Collection<Long> messageIds, Instant visibleAt);
 
+    /**
+     * Counts a failed attempt on a message consumed with {@code pop} inside a transaction that
+     * rolled back, and makes it visible again after {@code delay}, rounded up to whole seconds.
+     *
+     * <p>{@code read_ct} counts reads, and a pop is not one; a rolled-back pop leaves the message
+     * exactly as it was - uncounted, and visible at once. This restores what a failed read would
+     * have left behind, in one statement, so attempts survive restarts and are shared by every
+     * instance as they are in read mode. PGMQ has no function for it, so it updates the queue's
+     * table directly.
+     */
+    void retryAfterRollback(String queue, long messageId, Duration delay);
+
     // ---------------------------------------------------------------------
     // Introspection
     // ---------------------------------------------------------------------
