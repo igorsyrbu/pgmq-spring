@@ -3,7 +3,7 @@
 **PGMQ for the Spring ecosystem** — a Spring Boot 4 starter for
 [PGMQ](https://github.com/pgmq/pgmq), the Postgres-native message queue.
 
-[![JitPack](https://jitpack.io/v/igorsyrbu/pgmq-spring.svg)](https://jitpack.io/#igorsyrbu/pgmq-spring)
+[![JitPack](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.github.com%2Frepos%2Figorsyrbu%2Fpgmq-spring%2Ftags&query=%24%5B0%5D.name&label=JitPack&color=brightgreen)](https://jitpack.io/#igorsyrbu/pgmq-spring)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Java](https://img.shields.io/badge/Java-17%2B-orange.svg)](https://docs.spring.io/spring-boot/system-requirements.html)
 
