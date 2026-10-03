@@ -147,6 +147,9 @@ when there is one and otherwise requires headers.
 
 A failed message is retried until `read_ct` reaches `maxAttempts`; only then is the
 `failureAction` applied. Applying it on the first failure would make `maxAttempts` meaningless.
+The one exception is a type listed in `nonRetryableExceptions`, matched anywhere in the cause
+chain: a retry cannot fix it, so the terminal action is applied at once rather than after every
+attempt has been spent - which, with grouped reads, would also hold back the message's whole group.
 `REDELIVER` names no terminal state, so an exhausted or poisoned message under it is archived with
 an error log rather than looping for ever.
 

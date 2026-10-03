@@ -56,6 +56,8 @@ public class OrderConsumerConfiguration {
                         .retryDelay(Duration.ofSeconds(1))
                         .retryMultiplier(2.0)
                         .maxRetryDelay(Duration.ofSeconds(10))
+                        // No retry can fix an invalid order: dead-letter it on its first failure.
+                        .nonRetryableExceptions(InvalidOrderException.class)
                         .failureAction(FailureAction.DEAD_LETTER)
                         .deadLetterQueue("orders_dlq")
                         .build())

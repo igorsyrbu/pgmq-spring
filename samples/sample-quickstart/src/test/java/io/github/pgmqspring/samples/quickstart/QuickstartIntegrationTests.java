@@ -39,6 +39,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 import io.github.pgmqspring.core.PgmqContainerSupport;
 import io.github.pgmqspring.core.client.PgmqTemplate;
 import io.github.pgmqspring.core.client.ReadOptions;
+import io.github.pgmqspring.core.consumer.DeadLetterHeaders;
 import io.github.pgmqspring.core.consumer.PgmqMessageListenerContainer;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -140,8 +141,12 @@ class QuickstartIntegrationTests {
         await().atMost(Duration.ofSeconds(60))
                 .until(() -> this.pgmq.metrics("orders_dlq").queueLength() >= 1);
 
+        // Not retried: an invalid order is non-retryable, so it is dead-lettered on its first delivery.
         assertThat(this.pgmq.read("orders_dlq", ReadOptions.batch(5)))
-                .anySatisfy((message) -> assertThat(message.rawPayload()).contains("bad-order"));
+                .anySatisfy((message) -> {
+                    assertThat(message.rawPayload()).contains("bad-order");
+                    assertThat(message.header(DeadLetterHeaders.READ_COUNT)).isEqualTo(1);
+                });
         assertThat(confirmed("bad-order")).isFalse();
     }
 

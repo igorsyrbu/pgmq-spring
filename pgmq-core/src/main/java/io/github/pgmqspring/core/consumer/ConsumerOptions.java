@@ -19,6 +19,12 @@
 package io.github.pgmqspring.core.consumer;
 
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.IdentityHashMap;
+import java.util.List;
+import java.util.Set;
 
 import org.jspecify.annotations.Nullable;
 
@@ -63,6 +69,8 @@ public final class ConsumerOptions {
 
     private final int maxAttempts;
 
+    private final List<Class<? extends Throwable>> nonRetryableExceptions;
+
     private final @Nullable String deadLetterQueue;
 
     private final boolean transactional;
@@ -90,6 +98,7 @@ public final class ConsumerOptions {
         this.retryMultiplier = builder.retryMultiplier;
         this.maxRetryDelay = builder.maxRetryDelay;
         this.maxAttempts = builder.maxAttempts;
+        this.nonRetryableExceptions = List.copyOf(builder.nonRetryableExceptions);
         this.deadLetterQueue = builder.deadLetterQueue;
         this.transactional = builder.transactional;
         this.extendLease = builder.extendLease;
@@ -127,6 +136,7 @@ public final class ConsumerOptions {
         builder.retryMultiplier = this.retryMultiplier;
         builder.maxRetryDelay = this.maxRetryDelay;
         builder.maxAttempts = this.maxAttempts;
+        builder.nonRetryableExceptions = this.nonRetryableExceptions;
         builder.deadLetterQueue = this.deadLetterQueue;
         builder.transactional = this.transactional;
         builder.extendLease = this.extendLease;
@@ -221,6 +231,26 @@ public final class ConsumerOptions {
         return this.maxAttempts;
     }
 
+    public List<Class<? extends Throwable>> getNonRetryableExceptions() {
+        return this.nonRetryableExceptions;
+    }
+
+    /** Whether {@code error}, or any exception in its cause chain, is one of the non-retryable types. */
+    public boolean isNonRetryable(Throwable error) {
+        if (this.nonRetryableExceptions.isEmpty()) {
+            return false;
+        }
+        Set<Throwable> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+        for (Throwable current = error; current != null && seen.add(current); current = current.getCause()) {
+            for (Class<? extends Throwable> type : this.nonRetryableExceptions) {
+                if (type.isInstance(current)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     public @Nullable String getDeadLetterQueue() {
         return this.deadLetterQueue;
     }
@@ -255,6 +285,7 @@ public final class ConsumerOptions {
                 + ", acknowledgeMode=" + this.acknowledgeMode + ", failureAction=" + this.failureAction
                 + ", retryDelay=" + this.retryDelay + ", retryMultiplier=" + this.retryMultiplier
                 + ", maxRetryDelay=" + this.maxRetryDelay + ", maxAttempts=" + this.maxAttempts
+                + ", nonRetryableExceptions=" + this.nonRetryableExceptions.stream().map(Class::getName).toList()
                 + ", deadLetterQueue=" + this.deadLetterQueue + ", transactional=" + this.transactional
                 + ", extendLease=" + this.extendLease + ", batchAcknowledgements=" + this.batchAcknowledgements
                 + ", ackBatchSize=" + this.ackBatchSize + ", shutdownTimeout=" + this.shutdownTimeout + "]";
@@ -290,6 +321,8 @@ public final class ConsumerOptions {
         private @Nullable Duration maxRetryDelay;
 
         private int maxAttempts = 5;
+
+        private Collection<Class<? extends Throwable>> nonRetryableExceptions = List.of();
 
         private @Nullable String deadLetterQueue;
 
@@ -452,6 +485,29 @@ public final class ConsumerOptions {
             return this;
         }
 
+        /**
+         * Exception types that no retry can fix, such as a payload that fails validation. When one
+         * is found anywhere in the cause chain of a handler's exception - or of a payload
+         * conversion failure - the message skips its remaining attempts and gets the terminal
+         * {@link #failureAction(FailureAction)} at once, so a hopeless message neither occupies
+         * consumers nor, with {@link #groupOrdered(boolean)}, blocks its group. Replaces any types
+         * set before; empty by default.
+         */
+        @SafeVarargs
+        public final Builder nonRetryableExceptions(Class<? extends Throwable>... types) {
+            List<Class<? extends Throwable>> list = new ArrayList<>(types.length);
+            for (Class<? extends Throwable> type : types) {
+                list.add(type);
+            }
+            return nonRetryableExceptions(list);
+        }
+
+        /** As {@link #nonRetryableExceptions(Class[])}, from a collection. */
+        public Builder nonRetryableExceptions(Collection<Class<? extends Throwable>> types) {
+            this.nonRetryableExceptions = types;
+            return this;
+        }
+
         /** Queue that poisoned and failed messages are moved to. */
         public Builder deadLetterQueue(@Nullable String value) {
             this.deadLetterQueue = value;
@@ -560,6 +616,13 @@ public final class ConsumerOptions {
             }
             if (this.maxAttempts < 1) {
                 throw new IllegalArgumentException("maxAttempts must be at least 1");
+            }
+            for (Class<?> type : this.nonRetryableExceptions) {
+                // Checked at runtime too: a binder or a raw collection can bypass the generic bound.
+                if (type == null || !Throwable.class.isAssignableFrom(type)) {
+                    throw new IllegalArgumentException("nonRetryableExceptions must contain only exception types, but "
+                            + "contained " + (type != null ? type.getName() : "null"));
+                }
             }
             if (this.failureAction == FailureAction.DEAD_LETTER && this.deadLetterQueue == null) {
                 throw new IllegalArgumentException(

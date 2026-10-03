@@ -9,7 +9,7 @@ consumes**. No HTTP layer, no chunking, no bookkeeping. Start here.
   back together — the transactional outbox with no outbox table.
 - Consuming with `PgmqMessageListenerContainer`, declared as an ordinary bean.
 - Transactional processing, retries with exponential backoff, and dead-lettering after three
-  failed attempts.
+  failed attempts - or at once, for an exception that is not retryable.
 - A second, non-transactional consumer configured entirely from `pgmq.consumer.*`, which
   acknowledges each polled batch with one statement (`batch-acknowledgements`).
 - The health indicator and Micrometer metrics the starter contributes for free.
@@ -29,7 +29,7 @@ manual `CREATE EXTENSION` step.
 
 On startup it places three orders. Two succeed, and each confirmation publishes an
 `OrderConfirmed` event that the notification consumer records; the third has a negative total,
-which the handler rejects, so it is retried and then dead-lettered. You should see the
+which the handler rejects with a non-retryable exception, so it is dead-lettered at once. You should see the
 confirmations, the notifications and then the dead-letter in the log.
 
 ```bash

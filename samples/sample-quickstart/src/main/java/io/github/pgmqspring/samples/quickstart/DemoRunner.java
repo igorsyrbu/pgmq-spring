@@ -28,9 +28,9 @@ import org.springframework.stereotype.Component;
 /**
  * Places a few orders on startup so that running the sample actually shows something.
  *
- * <p>Two of them succeed. The third has a negative total, which {@link OrderHandler} rejects, so
- * it is retried three times and then dead-lettered - the whole happy path and failure path in one
- * run.
+ * <p>Two of them succeed. The third has a negative total, which {@link OrderHandler} rejects as
+ * an {@link InvalidOrderException}. That exception is non-retryable, so the order is dead-lettered
+ * on its first failure - the whole happy path and failure path in one run.
  *
  * <p>Disabled with {@code sample.demo.enabled=false}, which is what the integration tests do so
  * they can control their own data.

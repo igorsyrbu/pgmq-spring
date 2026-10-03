@@ -43,6 +43,7 @@ import io.github.pgmqspring.core.consumer.AcknowledgeMode;
 import io.github.pgmqspring.core.consumer.ConsumerOptions;
 import io.github.pgmqspring.core.consumer.FailureAction;
 import io.github.pgmqspring.core.convert.JacksonPayloadConverter;
+import io.github.pgmqspring.core.convert.PayloadConversionException;
 import io.github.pgmqspring.core.convert.PayloadConverter;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -164,6 +165,20 @@ class PgmqAutoConfigurationTests {
             assertThat(options.getRetryMultiplier()).isEqualTo(1.0);
             assertThat(options.getMaxRetryDelay()).isNull();
         });
+    }
+
+    @Test
+    void bindsNonRetryableExceptionsFromClassNames() {
+        this.runner.withPropertyValues(
+                "pgmq.consumer.non-retryable-exceptions[0]=java.lang.IllegalArgumentException",
+                "pgmq.consumer.non-retryable-exceptions[1]="
+                        + "io.github.pgmqspring.core.convert.PayloadConversionException").run((context) -> {
+                            ConsumerOptions options = context.getBean(ConsumerOptions.class);
+                            assertThat(options.getNonRetryableExceptions()).containsExactly(
+                                    IllegalArgumentException.class, PayloadConversionException.class);
+                        });
+        this.runner.withPropertyValues("pgmq.consumer.non-retryable-exceptions=java.lang.String")
+                .run((context) -> assertThat(context).hasFailed());
     }
 
     @Test

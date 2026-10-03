@@ -54,7 +54,7 @@ public class OrderHandler {
                 + " (delivery " + message.readCount() + ")");
 
         if (event.totalCents() < 0) {
-            throw new IllegalArgumentException("order " + event.orderId() + " has a negative total");
+            throw new InvalidOrderException("order " + event.orderId() + " has a negative total");
         }
 
         int confirmed = this.jdbc.sql("insert into order_confirmations(order_id, confirmed_at) values (?, now()) "

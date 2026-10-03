@@ -287,6 +287,13 @@ public class PgmqProperties {
         private int maxAttempts = 5;
 
         /**
+         * Fully qualified exception classes that no retry can fix. When one appears anywhere in the
+         * cause chain of a handler's exception, or of a payload conversion failure, the message
+         * skips its remaining attempts and gets the terminal failure-action at once.
+         */
+        private List<Class<? extends Throwable>> nonRetryableExceptions = new ArrayList<>();
+
+        /**
          * Queue that failed and poisoned messages are moved to. Required for
          * failure-action=dead-letter, must exist when the container starts, and must differ from
          * the consumed queue.
@@ -435,6 +442,14 @@ public class PgmqProperties {
 
         public void setMaxAttempts(int maxAttempts) {
             this.maxAttempts = maxAttempts;
+        }
+
+        public List<Class<? extends Throwable>> getNonRetryableExceptions() {
+            return this.nonRetryableExceptions;
+        }
+
+        public void setNonRetryableExceptions(List<Class<? extends Throwable>> nonRetryableExceptions) {
+            this.nonRetryableExceptions = nonRetryableExceptions;
         }
 
         public @Nullable String getDeadLetterQueue() {

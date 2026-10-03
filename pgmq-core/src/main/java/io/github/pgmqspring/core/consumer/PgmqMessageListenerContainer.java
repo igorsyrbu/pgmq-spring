@@ -790,11 +790,12 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
      * <p>{@link FailureAction} is the <strong>terminal</strong> action, not the action taken on
      * every failure. A message is retried until its attempts are exhausted, and only then is the
      * terminal action applied. Dead-lettering on the very first failure would make
-     * {@code maxAttempts} meaningless.
+     * {@code maxAttempts} meaningless - except for a non-retryable exception, which no retry can fix.
      */
     private void applyFailureAction(PgmqMessage<?> message, Throwable error, Lease lease) {
         lease.settle(message.id());
-        boolean exhausted = message.readCount() >= this.options.getMaxAttempts();
+        boolean nonRetryable = this.options.isNonRetryable(error);
+        boolean exhausted = nonRetryable || message.readCount() >= this.options.getMaxAttempts();
         try {
             if (!exhausted) {
                 Duration delay = this.options.retryDelayAfter(message.readCount());
@@ -805,7 +806,8 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
                 return;
             }
             Throwable cause = rootCause(error);
-            String reason = "exhausted maxAttempts=" + this.options.getMaxAttempts() + " after "
+            String reason = (nonRetryable ? "not retryable after " : "exhausted maxAttempts="
+                    + this.options.getMaxAttempts() + " after ")
                     + cause.getClass().getSimpleName()
                     + (cause.getMessage() != null ? ": " + cause.getMessage() : "");
             switch (this.options.getFailureAction()) {

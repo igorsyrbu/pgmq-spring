@@ -96,6 +96,7 @@ public class PgmqAutoConfiguration {
                 .retryMultiplier(consumer.getRetryMultiplier())
                 .maxRetryDelay(consumer.getMaxRetryDelay())
                 .maxAttempts(consumer.getMaxAttempts())
+                .nonRetryableExceptions(consumer.getNonRetryableExceptions())
                 .deadLetterQueue(consumer.getDeadLetterQueue())
                 .transactional(consumer.isTransactional())
                 .extendLease(consumer.isExtendLease())
