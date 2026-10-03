@@ -44,15 +44,15 @@ version JitPack supplies, without tests (JitPack's build machines have no Docker
 
 ### Releasing a version
 
-Use semantic version tags without a `v` prefix, such as `0.1.0`. JitPack uses the tag as the
+Use semantic version tags without a `v` prefix, such as `0.2.0`. JitPack uses the tag as the
 dependency version.
 
 1. Run the suite ([above](#before-any-release)).
 2. Tag the commit and push the tag:
 
    ```bash
-   git tag 0.1.0
-   git push origin 0.1.0
+   git tag 0.2.0
+   git push origin 0.2.0
    ```
 
 3. Optionally, create a GitHub release for the tag (**Releases → Draft a new release**) to publish
@@ -74,7 +74,7 @@ repositories {
 }
 
 dependencies {
-    implementation 'com.github.igorsyrbu.pgmq-spring:pgmq-spring-boot-starter:0.1.0'
+    implementation 'com.github.igorsyrbu.pgmq-spring:pgmq-spring-boot-starter:0.2.0'
 }
 ```
 
@@ -89,7 +89,7 @@ dependencies {
 <dependency>
     <groupId>com.github.igorsyrbu.pgmq-spring</groupId>
     <artifactId>pgmq-spring-boot-starter</artifactId>
-    <version>0.1.0</version>
+    <version>0.2.0</version>
 </dependency>
 ```
 
@@ -109,9 +109,9 @@ The starter brings `pgmq-core` and `pgmq-spring-boot-autoconfigure` transitively
   repository, then inspecting the POMs:
 
   ```bash
-  ./gradlew publishToMavenLocal -Pgroup=com.github.igorsyrbu -Pversion=0.1.0 \
+  ./gradlew publishToMavenLocal -Pgroup=com.github.igorsyrbu -Pversion=0.2.0 \
       -Dmaven.repo.local=/tmp/jitpack-preview
-  ls /tmp/jitpack-preview/com/github/igorsyrbu/*/0.1.0/
+  ls /tmp/jitpack-preview/com/github/igorsyrbu/*/0.2.0/
   ```
 
   `com.github.igorsyrbu` is JitPack's build-time `GROUP`. When JitPack exposes an individual
@@ -130,12 +130,12 @@ For trying a change in an application on the same machine, without tagging anyth
 ### Option 1: publish to the local Maven repository
 
 ```bash
-./gradlew publishToMavenLocal -Pversion=0.1.0-local
+./gradlew publishToMavenLocal -Pversion=0.2.0-local
 ```
 
 This installs the three modules into `~/.m2/repository/io/github/igorsyrbu/pgmq/` under the group from
-`gradle.properties`. Use a version of your own (`0.1.0-local` above) so it cannot be confused with a
-real release. Leaving out `-Pversion` publishes `0.1.0-SNAPSHOT`.
+`gradle.properties`. Use a version of your own (`0.2.0-local` above) so it cannot be confused with a
+real release. Leaving out `-Pversion` publishes `0.2.0`.
 
 In the application:
 
@@ -146,7 +146,7 @@ repositories {
 }
 
 dependencies {
-    implementation 'io.github.igorsyrbu.pgmq:pgmq-spring-boot-starter:0.1.0-local'
+    implementation 'io.github.igorsyrbu.pgmq:pgmq-spring-boot-starter:0.2.0-local'
 }
 ```
 
@@ -156,7 +156,7 @@ Maven reads `~/.m2` automatically, so a Maven application only needs the depende
 <dependency>
     <groupId>io.github.igorsyrbu.pgmq</groupId>
     <artifactId>pgmq-spring-boot-starter</artifactId>
-    <version>0.1.0-local</version>
+    <version>0.2.0-local</version>
 </dependency>
 ```
 
@@ -182,7 +182,7 @@ and keep the normal dependency:
 
 ```groovy
 dependencies {
-    implementation 'io.github.igorsyrbu.pgmq:pgmq-spring-boot-starter:0.1.0-SNAPSHOT'
+    implementation 'io.github.igorsyrbu.pgmq:pgmq-spring-boot-starter:0.2.0'
 }
 ```
 

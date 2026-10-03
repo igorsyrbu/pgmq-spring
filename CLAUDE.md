@@ -24,7 +24,7 @@ Docker must be running: integration tests start a real PGMQ container through Te
 ./gradlew build -PspringBootVersion=4.1.1                    # another Boot minor
 ./gradlew test -PtestJavaVersion=21                          # run tests on a newer JDK
 ./gradlew :samples:sample-quickstart:run                     # needs Postgres+PGMQ on localhost:5432
-./gradlew publishToMavenLocal -Pgroup=com.github.igorsyrbu -Pversion=0.1.0 -Dmaven.repo.local=/tmp/preview  # preview a JitPack release
+./gradlew publishToMavenLocal -Pgroup=com.github.igorsyrbu -Pversion=0.2.0 -Dmaven.repo.local=/tmp/preview  # preview a JitPack release
 ```
 
 Run anything that touches SQL or PGMQ's catalog on **both** v1.5.1 and v1.13.0: the SQL surface

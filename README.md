@@ -67,7 +67,7 @@ repositories {
 }
 
 dependencies {
-    implementation 'com.github.igorsyrbu.pgmq-spring:pgmq-spring-boot-starter:0.1.0'
+    implementation 'com.github.igorsyrbu.pgmq-spring:pgmq-spring-boot-starter:0.2.0'
     runtimeOnly 'org.postgresql:postgresql'
 }
 ```
@@ -85,7 +85,7 @@ dependencies {
 <dependency>
     <groupId>com.github.igorsyrbu.pgmq-spring</groupId>
     <artifactId>pgmq-spring-boot-starter</artifactId>
-    <version>0.1.0</version>
+    <version>0.2.0</version>
 </dependency>
 ```
 </details>

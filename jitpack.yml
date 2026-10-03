@@ -1,7 +1,7 @@
 # JitPack builds a release on demand from a git tag: https://jitpack.io
 #
 # Consumers depend on com.github.igorsyrbu.<repo>:<module>:<tag>, for example
-#   com.github.igorsyrbu.pgmq-spring:pgmq-spring-boot-starter:0.1.0
+#   com.github.igorsyrbu.pgmq-spring:pgmq-spring-boot-starter:0.2.0
 #
 # JitPack provides GROUP (com.github.igorsyrbu) and VERSION (the tag). They override the local
 # defaults in gradle.properties, because JitPack collects the artifacts from ~/.m2 under GROUP.
