@@ -22,21 +22,20 @@ import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
-import javax.sql.DataSource;
-
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionTimedOutException;
 
+import io.github.pgmqspring.core.ListenerContainers;
 import io.github.pgmqspring.core.PgmqContainerSupport;
 import io.github.pgmqspring.core.PgmqMessage;
 import io.github.pgmqspring.core.client.PgmqTemplate;
-import io.github.pgmqspring.core.convert.JacksonPayloadConverter;
 
+import static io.github.pgmqspring.core.PgmqContainerSupport.newQueue;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 import static org.awaitility.Awaitility.await;
@@ -50,33 +49,25 @@ class TransactionTimeoutIntegrationTests {
 
     private static JdbcTemplate jdbc;
 
-    private PgmqMessageListenerContainer<String> container;
+    @RegisterExtension
+    final ListenerContainers containers = new ListenerContainers();
 
     @BeforeAll
     static void setUp() {
-        DataSource dataSource = PgmqContainerSupport.dataSource();
-        pgmq = new PgmqTemplate(dataSource, new JacksonPayloadConverter());
-        transactionManager = new DataSourceTransactionManager(dataSource);
-        jdbc = new JdbcTemplate(dataSource);
-    }
-
-    @AfterEach
-    void stopContainer() {
-        if (this.container != null) {
-            this.container.stop();
-        }
+        pgmq = PgmqContainerSupport.template();
+        transactionManager = new DataSourceTransactionManager(PgmqContainerSupport.dataSource());
+        jdbc = PgmqContainerSupport.jdbc();
     }
 
     @Test
     void aHandlerThatOverrunsItsTransactionRollsBackAndIsRetried() {
-        String queue = PgmqContainerSupport.uniqueQueueName("tx_timeout");
-        pgmq.createQueue(queue);
+        String queue = newQueue("tx_timeout");
         String table = "public." + queue + "_writes";
         jdbc.execute("create table " + table + " (read_count int not null)");
         ConcurrentLinkedQueue<Throwable> failures = new ConcurrentLinkedQueue<>();
         ConcurrentLinkedQueue<Integer> succeeded = new ConcurrentLinkedQueue<>();
 
-        this.container = PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
+        this.containers.start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
                 .options(ConsumerOptions.builder()
                         .transactional(true)
                         .transactionTimeout(Duration.ofSeconds(1))
@@ -105,8 +96,7 @@ class TransactionTimeoutIntegrationTests {
                     }
                     jdbc.update("insert into " + table + " values (?)", message.readCount());
                 })
-                .build();
-        this.container.start();
+                .build());
         pgmq.send(queue, "slow the first time");
 
         await().atMost(Duration.ofSeconds(30)).until(() -> succeeded.contains(2));

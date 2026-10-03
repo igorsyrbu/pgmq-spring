@@ -28,19 +28,20 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import javax.sql.DataSource;
 
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.PlatformTransactionManager;
 
+import io.github.pgmqspring.core.ListenerContainers;
 import io.github.pgmqspring.core.PgmqContainerSupport;
 import io.github.pgmqspring.core.PgmqMessage;
 import io.github.pgmqspring.core.client.PgmqTemplate;
 import io.github.pgmqspring.core.client.ReadOptions;
-import io.github.pgmqspring.core.convert.JacksonPayloadConverter;
 
+import static io.github.pgmqspring.core.PgmqContainerSupport.newQueue;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
@@ -59,36 +60,16 @@ class PgmqMessageListenerContainerIntegrationTests {
 
     private static JdbcTemplate jdbc;
 
-    private final ConcurrentLinkedQueue<PgmqMessageListenerContainer<?>> containers =
-            new ConcurrentLinkedQueue<>();
+    @RegisterExtension
+    final ListenerContainers containers = new ListenerContainers();
 
     @BeforeAll
     static void setUp() {
         dataSource = PgmqContainerSupport.dataSource();
-        pgmq = new PgmqTemplate(dataSource, new JacksonPayloadConverter());
+        pgmq = PgmqContainerSupport.template();
         transactionManager = new DataSourceTransactionManager(dataSource);
-        jdbc = new JdbcTemplate(dataSource);
+        jdbc = PgmqContainerSupport.jdbc();
         jdbc.execute("create table if not exists consumer_demo (id bigint primary key, note text)");
-    }
-
-    @AfterEach
-    void stopContainers() {
-        PgmqMessageListenerContainer<?> container;
-        while ((container = this.containers.poll()) != null) {
-            container.stop();
-        }
-    }
-
-    private String newQueue(String prefix) {
-        String queue = PgmqContainerSupport.uniqueQueueName(prefix);
-        pgmq.createQueue(queue);
-        return queue;
-    }
-
-    private <T> PgmqMessageListenerContainer<T> start(PgmqMessageListenerContainer<T> container) {
-        this.containers.add(container);
-        container.start();
-        return container;
     }
 
     @Test
@@ -97,7 +78,7 @@ class PgmqMessageListenerContainerIntegrationTests {
         CountDownLatch handled = new CountDownLatch(3);
         ConcurrentLinkedQueue<String> received = new ConcurrentLinkedQueue<>();
 
-        start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
+        this.containers.start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
                 .options(ConsumerOptions.builder().pollDelay(Duration.ofMillis(50)).build())
                 .handler((message) -> {
                     received.add(message.payload());
@@ -117,7 +98,7 @@ class PgmqMessageListenerContainerIntegrationTests {
         String queue = newQueue("consume_archive");
         CountDownLatch handled = new CountDownLatch(1);
 
-        start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
+        this.containers.start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
                 .options(ConsumerOptions.builder()
                         .acknowledgeMode(AcknowledgeMode.ARCHIVE)
                         .pollDelay(Duration.ofMillis(50))
@@ -139,7 +120,7 @@ class PgmqMessageListenerContainerIntegrationTests {
         ConcurrentLinkedQueue<Integer> readCounts = new ConcurrentLinkedQueue<>();
         CountDownLatch twoDeliveries = new CountDownLatch(2);
 
-        start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
+        this.containers.start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
                 .options(ConsumerOptions.builder()
                         .visibilityTimeout(Duration.ofSeconds(1))
                         .retryDelay(Duration.ZERO)
@@ -167,7 +148,7 @@ class PgmqMessageListenerContainerIntegrationTests {
         String deadLetter = newQueue("poison_dlq");
         AtomicInteger attempts = new AtomicInteger();
 
-        start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
+        this.containers.start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
                 .options(ConsumerOptions.builder()
                         .visibilityTimeout(Duration.ofSeconds(1))
                         .retryDelay(Duration.ZERO)
@@ -210,7 +191,7 @@ class PgmqMessageListenerContainerIntegrationTests {
     void archivesAPoisonMessageWhenNoDeadLetterQueueIsConfigured() {
         String queue = newQueue("poison_archive");
 
-        start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
+        this.containers.start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
                 .options(ConsumerOptions.builder()
                         .visibilityTimeout(Duration.ofSeconds(1))
                         .retryDelay(Duration.ZERO)
@@ -234,7 +215,7 @@ class PgmqMessageListenerContainerIntegrationTests {
         String queue = newQueue("tx_commit_consumer");
         CountDownLatch handled = new CountDownLatch(1);
 
-        start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
+        this.containers.start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
                 .options(ConsumerOptions.builder()
                         .transactional(true)
                         .pollDelay(Duration.ofMillis(50))
@@ -260,7 +241,7 @@ class PgmqMessageListenerContainerIntegrationTests {
         String queue = newQueue("tx_rollback_consumer");
         AtomicInteger attempts = new AtomicInteger();
 
-        start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
+        this.containers.start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
                 .options(ConsumerOptions.builder()
                         .transactional(true)
                         .visibilityTimeout(Duration.ofSeconds(1))
@@ -292,7 +273,7 @@ class PgmqMessageListenerContainerIntegrationTests {
         String queue = newQueue("manual_ack");
         CountDownLatch retried = new CountDownLatch(2);
 
-        start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
+        this.containers.start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
                 .options(ConsumerOptions.builder()
                         .acknowledgeMode(AcknowledgeMode.MANUAL)
                         .pollDelay(Duration.ofMillis(50))
@@ -321,7 +302,7 @@ class PgmqMessageListenerContainerIntegrationTests {
         String queue = newQueue("manual_noop");
         AtomicInteger deliveries = new AtomicInteger();
 
-        start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
+        this.containers.start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
                 .options(ConsumerOptions.builder()
                         .acknowledgeMode(AcknowledgeMode.MANUAL)
                         .visibilityTimeout(Duration.ofSeconds(1))
@@ -344,7 +325,7 @@ class PgmqMessageListenerContainerIntegrationTests {
         ConcurrentLinkedQueue<Integer> batchSizes = new ConcurrentLinkedQueue<>();
         AtomicInteger total = new AtomicInteger();
 
-        start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
+        this.containers.start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
                 .options(ConsumerOptions.builder().batchSize(10).pollDelay(Duration.ofMillis(50)).build())
                 .batchHandler((messages) -> {
                     batchSizes.add(messages.size());
@@ -365,7 +346,7 @@ class PgmqMessageListenerContainerIntegrationTests {
         AtomicInteger handled = new AtomicInteger();
 
         PgmqMessageListenerContainer<String> container =
-                start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
+                this.containers.start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
                         .options(ConsumerOptions.builder().pollDelay(Duration.ofMillis(50)).build())
                         .handler((message) -> handled.incrementAndGet())
                         .build());
@@ -404,8 +385,7 @@ class PgmqMessageListenerContainerIntegrationTests {
                             finished.countDown();
                         })
                         .build();
-        this.containers.add(container);
-        container.start();
+        this.containers.start(container);
 
         pgmq.send(queue, Map.of("slow", true));
         assertThat(started.await(20, TimeUnit.SECONDS)).isTrue();
@@ -428,7 +408,7 @@ class PgmqMessageListenerContainerIntegrationTests {
         AtomicInteger failures = new AtomicInteger();
         CountDownLatch both = new CountDownLatch(2);
 
-        start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
+        this.containers.start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
                 .options(ConsumerOptions.builder()
                         .pollDelay(Duration.ofMillis(50))
                         .visibilityTimeout(Duration.ofSeconds(30))

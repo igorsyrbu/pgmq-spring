@@ -27,6 +27,7 @@ import javax.sql.DataSource;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
+import org.springframework.boot.LazyInitializationBeanFactoryPostProcessor;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.assertj.AssertableApplicationContext;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
@@ -150,7 +151,8 @@ class DeclaredConsumersTests {
                 "pgmq.queues[0].name=" + queue,
                 "pgmq.consumers.orders.queue=" + queue,
                 "pgmq.consumers.orders.handler=orderHandler",
-                "pgmq.consumers.orders.payload-type=java.lang.Integer").run((context) -> assertThat(failure(context)).contains("pgmq.consumers.orders.payload-type is java.lang.Integer")
+                "pgmq.consumers.orders.payload-type=java.lang.Integer").run((context) -> assertThat(failure(context))
+                        .contains("pgmq.consumers.orders.payload-type is java.lang.Integer")
                         .contains(Order.class.getName()));
     }
 
@@ -162,7 +164,8 @@ class DeclaredConsumersTests {
         untyped.withPropertyValues(
                 "pgmq.queues[0].name=" + queue,
                 "pgmq.consumers.orders.queue=" + queue,
-                "pgmq.consumers.orders.handler=untypedHandler").run((context) -> assertThat(failure(context)).contains("pgmq.consumers.orders.payload-type is required"));
+                "pgmq.consumers.orders.handler=untypedHandler").run((context) -> assertThat(failure(context))
+                        .contains("pgmq.consumers.orders.payload-type is required"));
         untyped.withPropertyValues(
                 "pgmq.queues[0].name=" + queue,
                 "pgmq.consumers.orders.queue=" + queue,
@@ -174,11 +177,13 @@ class DeclaredConsumersTests {
     @Test
     void aMissingOrInvalidHandlerFailsStartup() {
         this.runner.withPropertyValues("pgmq.consumers.orders.handler=noSuchHandler")
-                .run((context) -> assertThat(failure(context)).contains("pgmq.consumers.orders.handler names bean 'noSuchHandler'"));
+                .run((context) -> assertThat(failure(context))
+                        .contains("pgmq.consumers.orders.handler names bean 'noSuchHandler'"));
         this.runner.withPropertyValues("pgmq.consumers.orders.queue=orders")
                 .run((context) -> assertThat(failure(context)).contains("pgmq.consumers.orders.handler is required"));
         this.runner.withPropertyValues("pgmq.consumers.orders.handler=dataSource", "pgmq.consumers.orders.payload-type="
-                + "java.lang.String").run((context) -> assertThat(failure(context)).contains("is not a PgmqMessageHandler"));
+                + "java.lang.String").run((context) -> assertThat(failure(context))
+                        .contains("is not a PgmqMessageHandler"));
     }
 
     @Test
@@ -187,10 +192,53 @@ class DeclaredConsumersTests {
                 "pgmq.consumers.first.queue=orders",
                 "pgmq.consumers.first.handler=orderHandler",
                 "pgmq.consumers.second.queue=Orders",
-                "pgmq.consumers.second.handler=orderHandler").run((context) -> assertThat(failure(context)).contains("pgmq.consumers.first and pgmq.consumers.second both consume queue"));
+                "pgmq.consumers.second.handler=orderHandler").run((context) -> assertThat(failure(context))
+                        .contains("pgmq.consumers.first and pgmq.consumers.second both consume queue"));
         this.runner.withPropertyValues(
                 "pgmq.consumers.orders.handler=orderHandler",
-                "pgmq.consumers.orders.failure-action=dead-letter").run((context) -> assertThat(failure(context)).contains("pgmq.consumers.orders: failureAction=DEAD_LETTER requires deadLetterQueue"));
+                "pgmq.consumers.orders.failure-action=dead-letter").run((context) -> assertThat(failure(context))
+                        .contains("pgmq.consumers.orders: failureAction=DEAD_LETTER requires deadLetterQueue"));
+    }
+
+    @Test
+    void consumerDefaultsDoNotApplyEntryOnlyKeys() {
+        String queue = queue("declared_entry_only");
+        this.runner.withPropertyValues(
+                "pgmq.queues[0].name=" + queue,
+                "pgmq.consumer.queue=some_other_queue",
+                "pgmq.consumer.handler=noSuchHandler",
+                "pgmq.consumer.auto-startup=false",
+                "pgmq.consumers." + queue + ".handler=orderHandler").run((context) -> {
+                    PgmqMessageListenerContainer<?> container =
+                            context.getBean("pgmqConsumer-" + queue, PgmqMessageListenerContainer.class);
+                    assertThat(container.getQueue()).isEqualTo(queue);
+                    assertThat(container.isRunning()).isTrue();
+                });
+    }
+
+    @Test
+    void aBlankQueueFallsBackToTheConsumersName() {
+        String queue = queue("declared_blank_queue");
+        this.runner.withPropertyValues(
+                "pgmq.queues[0].name=" + queue,
+                "pgmq.consumers." + queue + ".queue=",
+                "pgmq.consumers." + queue + ".handler=orderHandler").run((context) -> assertThat(
+                        context.getBean("pgmqConsumer-" + queue, PgmqMessageListenerContainer.class).getQueue())
+                                .isEqualTo(queue));
+    }
+
+    @Test
+    void aDeclaredConsumerStartsUnderLazyInitialization() {
+        String queue = queue("declared_lazy");
+        this.runner.withInitializer((context) -> context
+                .addBeanFactoryPostProcessor(new LazyInitializationBeanFactoryPostProcessor()))
+                .withPropertyValues(
+                        "pgmq.queues[0].name=" + queue,
+                        "pgmq.consumers." + queue + ".handler=orderHandler").run((context) -> {
+                            context.getBean(PgmqTemplate.class).send(queue, new Order("lazy", 1));
+                            OrderHandler handler = context.getBean(OrderHandler.class);
+                            await().atMost(Duration.ofSeconds(20)).until(() -> handler.received.size() == 1);
+                        });
     }
 
     @Test

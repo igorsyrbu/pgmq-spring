@@ -29,8 +29,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
 
 import io.github.pgmqspring.core.PgmqContainerSupport;
 import io.github.pgmqspring.core.PgmqMessage;
-import io.github.pgmqspring.core.convert.JacksonPayloadConverter;
 
+import static io.github.pgmqspring.core.PgmqContainerSupport.newQueue;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -50,14 +50,8 @@ class SendMessagesIntegrationTests {
 
     @BeforeAll
     static void setUp() {
-        pgmq = new PgmqTemplate(PgmqContainerSupport.dataSource(), new JacksonPayloadConverter());
-        jdbc = pgmq.getJdbcTemplate();
-    }
-
-    private static String newQueue(String prefix) {
-        String queue = PgmqContainerSupport.uniqueQueueName(prefix);
-        pgmq.createQueue(queue);
-        return queue;
+        pgmq = PgmqContainerSupport.template();
+        jdbc = PgmqContainerSupport.jdbc();
     }
 
     @Test

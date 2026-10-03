@@ -23,23 +23,23 @@ import java.util.List;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import javax.sql.DataSource;
-
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.PlatformTransactionManager;
 
+import io.github.pgmqspring.core.ListenerContainers;
 import io.github.pgmqspring.core.PgmqContainerSupport;
 import io.github.pgmqspring.core.PgmqMessage;
 import io.github.pgmqspring.core.client.PgmqTemplate;
 import io.github.pgmqspring.core.client.ReadOptions;
 import io.github.pgmqspring.core.client.SendOptions;
-import io.github.pgmqspring.core.convert.JacksonPayloadConverter;
 import io.github.pgmqspring.core.convert.PayloadConversionException;
 
+import static io.github.pgmqspring.core.PgmqContainerSupport.countRows;
+import static io.github.pgmqspring.core.PgmqContainerSupport.newQueue;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 import static org.awaitility.Awaitility.await;
@@ -74,33 +74,14 @@ class NonRetryableExceptionsIntegrationTests {
 
     private static JdbcTemplate jdbc;
 
-    private final ConcurrentLinkedQueue<PgmqMessageListenerContainer<?>> containers = new ConcurrentLinkedQueue<>();
+    @RegisterExtension
+    final ListenerContainers containers = new ListenerContainers();
 
     @BeforeAll
     static void setUp() {
-        DataSource dataSource = PgmqContainerSupport.dataSource();
-        pgmq = new PgmqTemplate(dataSource, new JacksonPayloadConverter());
-        transactionManager = new DataSourceTransactionManager(dataSource);
-        jdbc = new JdbcTemplate(dataSource);
-    }
-
-    @AfterEach
-    void stopContainers() {
-        PgmqMessageListenerContainer<?> container;
-        while ((container = this.containers.poll()) != null) {
-            container.stop();
-        }
-    }
-
-    private static String newQueue(String prefix) {
-        String queue = PgmqContainerSupport.uniqueQueueName(prefix);
-        pgmq.createQueue(queue);
-        return queue;
-    }
-
-    private static int count(String table) {
-        Integer n = jdbc.queryForObject("select count(*) from pgmq." + table, Integer.class);
-        return n != null ? n : 0;
+        pgmq = PgmqContainerSupport.template();
+        transactionManager = new DataSourceTransactionManager(PgmqContainerSupport.dataSource());
+        jdbc = PgmqContainerSupport.jdbc();
     }
 
     private static ConsumerOptions.Builder deadLettering(String dlq) {
@@ -116,13 +97,9 @@ class NonRetryableExceptionsIntegrationTests {
                 .maxPollDelay(Duration.ofMillis(100));
     }
 
-    private <T> void start(PgmqMessageListenerContainer<T> container) {
-        this.containers.add(container);
-        container.start();
-    }
-
     private void assertDeadLetteredOnFirstDelivery(String queue, String dlq, AtomicInteger invocations) {
-        await().atMost(Duration.ofSeconds(20)).until(() -> count("q_" + queue) == 0 && count("q_" + dlq) == 1);
+        await().atMost(Duration.ofSeconds(20))
+                .until(() -> countRows("pgmq.q_" + queue) == 0 && countRows("pgmq.q_" + dlq) == 1);
         PgmqMessage<String> dead = pgmq.read(dlq, ReadOptions.defaults()).get(0);
         assertThat(((Number) dead.header(DeadLetterHeaders.READ_COUNT)).intValue()).isEqualTo(1);
         assertThat((String) dead.header(DeadLetterHeaders.REASON)).startsWith("not retryable after ");
@@ -135,7 +112,7 @@ class NonRetryableExceptionsIntegrationTests {
         String dlq = newQueue("non_retryable_dlq");
         AtomicInteger invocations = new AtomicInteger();
 
-        start(PgmqMessageListenerContainer.builder(pgmq, queue, Order.class)
+        this.containers.start(PgmqMessageListenerContainer.builder(pgmq, queue, Order.class)
                 .options(deadLettering(dlq).build())
                 .transactionManager(transactionManager)
                 .handler((message) -> {
@@ -155,7 +132,7 @@ class NonRetryableExceptionsIntegrationTests {
         String dlq = newQueue("non_retryable_wrapped_dlq");
         AtomicInteger invocations = new AtomicInteger();
 
-        start(PgmqMessageListenerContainer.builder(pgmq, queue, Order.class)
+        this.containers.start(PgmqMessageListenerContainer.builder(pgmq, queue, Order.class)
                 .options(deadLettering(dlq).build())
                 .transactionManager(transactionManager)
                 .handler((message) -> {
@@ -175,7 +152,7 @@ class NonRetryableExceptionsIntegrationTests {
         String dlq = newQueue("non_retryable_checked_dlq");
         AtomicInteger invocations = new AtomicInteger();
 
-        start(PgmqMessageListenerContainer.builder(pgmq, queue, Order.class)
+        this.containers.start(PgmqMessageListenerContainer.builder(pgmq, queue, Order.class)
                 .options(deadLettering(dlq).build())
                 .transactionManager(transactionManager)
                 .handler((message) -> {
@@ -194,7 +171,7 @@ class NonRetryableExceptionsIntegrationTests {
         String dlq = newQueue("non_retryable_unconvertible_dlq");
         AtomicInteger invocations = new AtomicInteger();
 
-        start(PgmqMessageListenerContainer.builder(pgmq, queue, Order.class)
+        this.containers.start(PgmqMessageListenerContainer.builder(pgmq, queue, Order.class)
                 .options(deadLettering(dlq).build())
                 .transactionManager(transactionManager)
                 .handler((message) -> invocations.incrementAndGet())
@@ -211,7 +188,7 @@ class NonRetryableExceptionsIntegrationTests {
         String dlq = newQueue("retryable_dlq");
         ConcurrentLinkedQueue<Integer> readCounts = new ConcurrentLinkedQueue<>();
 
-        start(PgmqMessageListenerContainer.builder(pgmq, queue, Order.class)
+        this.containers.start(PgmqMessageListenerContainer.builder(pgmq, queue, Order.class)
                 .options(deadLettering(dlq).build())
                 .transactionManager(transactionManager)
                 .handler((message) -> {
@@ -221,7 +198,7 @@ class NonRetryableExceptionsIntegrationTests {
                 .build());
         pgmq.send(queue, new Order("a", 1));
 
-        await().atMost(Duration.ofSeconds(30)).until(() -> count("q_" + dlq) == 1);
+        await().atMost(Duration.ofSeconds(30)).until(() -> countRows("pgmq.q_" + dlq) == 1);
         assertThat(readCounts).containsExactly(1, 2, 3);
         PgmqMessage<String> dead = pgmq.read(dlq, ReadOptions.defaults()).get(0);
         assertThat((String) dead.header(DeadLetterHeaders.REASON)).startsWith("exhausted maxAttempts=3");

@@ -30,13 +30,14 @@ import io.github.pgmqspring.core.client.PgmqOperations;
 /**
  * Reports whether PGMQ is usable.
  *
- * <p>The indicator is DOWN when the {@code pgmq} schema is missing or the installed version is
- * below the configured minimum, and - if {@code pgmq.health.max-queue-depth} is set - when any
- * monitored queue is deeper than that.
+ * <p>The indicator is DOWN when the {@code pgmq} schema is missing or the database is
+ * unreachable, and - if {@code pgmq.health.max-queue-depth} is set - when any monitored queue is
+ * deeper than that.
  *
  * <p>Queue depth is only checked for the queues named in {@code pgmq.health.queues}. Checking
  * every queue would make the cost of a health check grow with the number of queues, which is a
- * poor property for something a load balancer polls.
+ * poor property for something a load balancer polls. Even so, each monitored queue costs one
+ * {@code pgmq.metrics()} call per health check, which scans the queue table.
  */
 public class PgmqHealthIndicator extends AbstractHealthIndicator {
 
@@ -84,7 +85,8 @@ public class PgmqHealthIndicator extends AbstractHealthIndicator {
                 // A monitored queue that is missing - renamed, dropped, misspelt in configuration -
                 // is reported, but does not take the whole indicator DOWN: PGMQ itself is healthy,
                 // and a load balancer pulling the instance would not fix the configuration.
-                builder.withDetail("queue." + queue + ".error", ex.getMessage() != null ? ex.getMessage() : ex.toString());
+                builder.withDetail("queue." + queue + ".error",
+                        ex.getMessage() != null ? ex.getMessage() : ex.toString());
                 continue;
             }
             builder.withDetail("queue." + queue + ".length", metrics.queueLength());

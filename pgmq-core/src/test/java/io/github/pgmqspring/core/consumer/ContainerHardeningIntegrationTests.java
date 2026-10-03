@@ -26,25 +26,27 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
 
-import javax.sql.DataSource;
-
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.PlatformTransactionManager;
 
 import io.github.pgmqspring.core.InvalidQueueNameException;
+import io.github.pgmqspring.core.ListenerContainers;
 import io.github.pgmqspring.core.PgmqContainerSupport;
 import io.github.pgmqspring.core.PgmqMessage;
 import io.github.pgmqspring.core.client.PgmqTemplate;
 import io.github.pgmqspring.core.client.ReadOptions;
 import io.github.pgmqspring.core.client.SendOptions;
-import io.github.pgmqspring.core.convert.JacksonPayloadConverter;
 import io.github.pgmqspring.core.convert.PayloadConversionException;
 
+import static io.github.pgmqspring.core.PgmqContainerSupport.countRows;
+import static io.github.pgmqspring.core.PgmqContainerSupport.newQueue;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
@@ -65,39 +67,14 @@ class ContainerHardeningIntegrationTests {
 
     private static JdbcTemplate jdbc;
 
-    private final ConcurrentLinkedQueue<PgmqMessageListenerContainer<?>> containers = new ConcurrentLinkedQueue<>();
+    @RegisterExtension
+    final ListenerContainers containers = new ListenerContainers();
 
     @BeforeAll
     static void setUp() {
-        DataSource dataSource = PgmqContainerSupport.dataSource();
-        pgmq = new PgmqTemplate(dataSource, new JacksonPayloadConverter());
-        transactionManager = new DataSourceTransactionManager(dataSource);
-        jdbc = new JdbcTemplate(dataSource);
-    }
-
-    @AfterEach
-    void stopContainers() {
-        PgmqMessageListenerContainer<?> container;
-        while ((container = this.containers.poll()) != null) {
-            container.stop();
-        }
-    }
-
-    private static String newQueue(String prefix) {
-        String queue = PgmqContainerSupport.uniqueQueueName(prefix);
-        pgmq.createQueue(queue);
-        return queue;
-    }
-
-    private <T> PgmqMessageListenerContainer<T> start(PgmqMessageListenerContainer<T> container) {
-        this.containers.add(container);
-        container.start();
-        return container;
-    }
-
-    private static int count(String table) {
-        Integer n = jdbc.queryForObject("select count(*) from pgmq." + table, Integer.class);
-        return n != null ? n : 0;
+        pgmq = PgmqContainerSupport.template();
+        transactionManager = new DataSourceTransactionManager(PgmqContainerSupport.dataSource());
+        jdbc = PgmqContainerSupport.jdbc();
     }
 
     @Test
@@ -110,7 +87,7 @@ class ContainerHardeningIntegrationTests {
         pgmq.sendRaw(queue, "\"not an order\"", SendOptions.none());
         pgmq.sendBatch(queue, List.of(new Order("a", 1), new Order("b", 2), new Order("c", 3)));
 
-        start(PgmqMessageListenerContainer.builder(pgmq, queue, Order.class)
+        this.containers.start(PgmqMessageListenerContainer.builder(pgmq, queue, Order.class)
                 .options(ConsumerOptions.builder()
                         .batchSize(10)
                         .visibilityTimeout(Duration.ofSeconds(1))
@@ -125,7 +102,8 @@ class ContainerHardeningIntegrationTests {
                 .build());
 
         await().atMost(Duration.ofSeconds(20)).until(() -> handled.size() == 3);
-        await().atMost(Duration.ofSeconds(20)).until(() -> count("q_" + queue) == 0 && count("q_" + dlq) == 1);
+        await().atMost(Duration.ofSeconds(20))
+                .until(() -> countRows("pgmq.q_" + queue) == 0 && countRows("pgmq.q_" + dlq) == 1);
         assertThat(handled).containsExactlyInAnyOrder("a", "b", "c");
         PgmqMessage<String> dead = pgmq.read(dlq, ReadOptions.defaults()).get(0);
         assertThat(dead.rawPayload()).isEqualTo("\"not an order\"");
@@ -140,7 +118,7 @@ class ContainerHardeningIntegrationTests {
         // Three messages at 2s each take 6s, twice the 3s visibility timeout. Without a batch-wide
         // lease the second polling loop re-reads the waiting ones and they run twice. The lease is
         // refreshed every second, so a refresh delayed by a busy machine still leaves margin.
-        start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
+        this.containers.start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
                 .options(ConsumerOptions.builder()
                         .concurrency(2)
                         .batchSize(3)
@@ -156,7 +134,7 @@ class ContainerHardeningIntegrationTests {
                 .build());
         pgmq.sendBatch(queue, List.of(Map.of("n", 1), Map.of("n", 2), Map.of("n", 3)));
 
-        await().atMost(Duration.ofSeconds(30)).until(() -> count("q_" + queue) == 0);
+        await().atMost(Duration.ofSeconds(30)).until(() -> countRows("pgmq.q_" + queue) == 0);
         await().during(Duration.ofSeconds(1)).atMost(Duration.ofSeconds(5)).until(() -> readCounts.size() == 3);
         assertThat(readCounts).containsOnly(1);
     }
@@ -166,7 +144,7 @@ class ContainerHardeningIntegrationTests {
         String queue = newQueue("lease_batch_handler");
         ConcurrentLinkedQueue<Long> handled = new ConcurrentLinkedQueue<>();
 
-        start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
+        this.containers.start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
                 .options(ConsumerOptions.builder()
                         .concurrency(2)
                         .batchSize(5)
@@ -182,7 +160,7 @@ class ContainerHardeningIntegrationTests {
                 .build());
         pgmq.sendBatch(queue, List.of(Map.of("n", 1), Map.of("n", 2)));
 
-        await().atMost(Duration.ofSeconds(30)).until(() -> count("q_" + queue) == 0);
+        await().atMost(Duration.ofSeconds(30)).until(() -> countRows("pgmq.q_" + queue) == 0);
         await().during(Duration.ofSeconds(1)).atMost(Duration.ofSeconds(5)).until(() -> handled.size() == 2);
         assertThat(handled).doesNotHaveDuplicates();
     }
@@ -192,7 +170,7 @@ class ContainerHardeningIntegrationTests {
         String queue = newQueue("lease_retry");
         CountDownLatch failed = new CountDownLatch(1);
 
-        start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
+        this.containers.start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
                 .options(ConsumerOptions.builder()
                         .visibilityTimeout(Duration.ofSeconds(3))
                         .extendLease(true)
@@ -226,7 +204,7 @@ class ContainerHardeningIntegrationTests {
         String dlq = newQueue("ack_then_throw_dlq");
         CountDownLatch failed = new CountDownLatch(1);
 
-        start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
+        this.containers.start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
                 .options(ConsumerOptions.builder()
                         .acknowledgeMode(AcknowledgeMode.MANUAL)
                         .maxAttempts(1)
@@ -249,18 +227,18 @@ class ContainerHardeningIntegrationTests {
 
         await().atMost(Duration.ofSeconds(20)).until(() -> failed.getCount() == 0);
         await().during(Duration.ofSeconds(1)).atMost(Duration.ofSeconds(5))
-                .until(() -> count("q_" + queue) == 0 && count("q_" + dlq) == 0);
+                .until(() -> countRows("pgmq.q_" + queue) == 0 && countRows("pgmq.q_" + dlq) == 0);
     }
 
     @Test
     void aSettlementThatFailsFallsBackToTheFailureAction() {
         String queue = newQueue("settle_fails");
-        java.util.concurrent.atomic.AtomicInteger attempts = new java.util.concurrent.atomic.AtomicInteger();
+        AtomicInteger attempts = new AtomicInteger();
 
         // deadLetter() with no dead-letter queue throws. The message must not count as settled, so
         // the failure action applies: here, parking it for the 60s retry delay. Were it mistaken
         // for settled it would be left alone and come straight back after its 1s lease.
-        start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
+        this.containers.start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
                 .options(ConsumerOptions.builder()
                         .acknowledgeMode(AcknowledgeMode.MANUAL)
                         .visibilityTimeout(Duration.ofSeconds(1))
@@ -313,7 +291,7 @@ class ContainerHardeningIntegrationTests {
                 .handler((message) -> { })
                 .verifyQueuesOnStart(false)
                 .build();
-        start(unchecked);
+        this.containers.start(unchecked);
         assertThat(unchecked.isRunning()).isTrue();
     }
 
@@ -322,7 +300,7 @@ class ContainerHardeningIntegrationTests {
         String queue = newQueue("async_stop");
         CountDownLatch inHandler = new CountDownLatch(1);
         AtomicBoolean finished = new AtomicBoolean();
-        PgmqMessageListenerContainer<String> container = start(PgmqMessageListenerContainer
+        PgmqMessageListenerContainer<String> container = this.containers.start(PgmqMessageListenerContainer
                 .builder(pgmq, queue, String.class)
                 .options(ConsumerOptions.builder().pollDelay(Duration.ofMillis(50)).build())
                 .handler((message) -> {
@@ -352,11 +330,11 @@ class ContainerHardeningIntegrationTests {
                 .handler((message) -> { })
                 .build();
         container.setBeanName("keepalive-test");
-        java.util.function.Supplier<List<Thread>> keepers = () -> Thread.getAllStackTraces().keySet().stream()
+        Supplier<List<Thread>> keepers = () -> Thread.getAllStackTraces().keySet().stream()
                 .filter((t) -> t.getName().equals("keepalive-test-keepalive") && t.isAlive())
                 .toList();
 
-        start(container);
+        this.containers.start(container);
         // Polling threads are daemon threads; without a non-daemon thread a consumer-only
         // application would exit right after startup.
         assertThat(keepers.get()).singleElement().satisfies((t) -> assertThat(t.isDaemon()).isFalse());
@@ -370,7 +348,7 @@ class ContainerHardeningIntegrationTests {
         String queue = newQueue("stop_join");
         CountDownLatch inHandler = new CountDownLatch(1);
         AtomicBoolean finished = new AtomicBoolean();
-        PgmqMessageListenerContainer<String> container = start(PgmqMessageListenerContainer
+        PgmqMessageListenerContainer<String> container = this.containers.start(PgmqMessageListenerContainer
                 .builder(pgmq, queue, String.class)
                 .options(ConsumerOptions.builder().pollDelay(Duration.ofMillis(50)).build())
                 .handler((message) -> {
@@ -392,7 +370,7 @@ class ContainerHardeningIntegrationTests {
     void aBatchHandlerLogsWithTheQueueInTheMdc() {
         String queue = newQueue("batch_mdc");
         ConcurrentLinkedQueue<String> seen = new ConcurrentLinkedQueue<>();
-        start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
+        this.containers.start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
                 .options(ConsumerOptions.builder().batchSize(5).pollDelay(Duration.ofMillis(50)).build())
                 .batchHandler((batch) -> seen.add(String.valueOf(org.slf4j.MDC.get("pgmq.queue"))))
                 .build());

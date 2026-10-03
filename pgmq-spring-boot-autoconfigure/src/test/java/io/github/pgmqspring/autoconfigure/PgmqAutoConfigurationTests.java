@@ -35,6 +35,7 @@ import org.springframework.boot.micrometer.metrics.autoconfigure.export.simple.S
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.jdbc.datasource.DelegatingDataSource;
 
 import io.github.pgmqspring.core.PgmqContainerSupport;
 import io.github.pgmqspring.core.PgmqNotInstalledException;
@@ -49,6 +50,7 @@ import io.github.pgmqspring.core.consumer.WakeUp;
 import io.github.pgmqspring.core.convert.JacksonPayloadConverter;
 import io.github.pgmqspring.core.convert.PayloadConversionException;
 import io.github.pgmqspring.core.convert.PayloadConverter;
+import io.github.pgmqspring.core.micrometer.PgmqMetrics;
 import io.github.pgmqspring.core.micrometer.PgmqQueueGauges;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -269,23 +271,25 @@ class PgmqAutoConfigurationTests {
 
     @Test
     void appliesGaugeRefreshIntervals() {
-        this.runner.withUserConfiguration(MeterRegistryConfiguration.class).withPropertyValues("pgmq.metrics.queues[0]=orders", "pgmq.metrics.queues[1]=payments",
+        ApplicationContextRunner metrics = this.runner.withUserConfiguration(MeterRegistryConfiguration.class);
+        metrics.withPropertyValues("pgmq.metrics.queues[0]=orders", "pgmq.metrics.queues[1]=payments",
                 "pgmq.metrics.refresh-interval=20s", "pgmq.metrics.refresh-intervals.payments=2s")
                 .run((context) -> {
                     PgmqQueueGauges gauges = context.getBean(PgmqQueueGauges.class);
                     assertThat(gauges.refreshInterval("orders")).isEqualTo(Duration.ofSeconds(20));
                     assertThat(gauges.refreshInterval("payments")).isEqualTo(Duration.ofSeconds(2));
                 });
-        this.runner.withUserConfiguration(MeterRegistryConfiguration.class).withPropertyValues("pgmq.metrics.queues[0]=orders").run((context) -> assertThat(
+        metrics.withPropertyValues("pgmq.metrics.queues[0]=orders").run((context) -> assertThat(
                 context.getBean(PgmqQueueGauges.class).refreshInterval("orders")).isEqualTo(Duration.ofSeconds(10)));
-        this.runner.withUserConfiguration(MeterRegistryConfiguration.class).withPropertyValues("pgmq.metrics.queues[0]=orders", "pgmq.metrics.refresh-intervals.audit=2s")
+        metrics.withPropertyValues("pgmq.metrics.queues[0]=orders", "pgmq.metrics.refresh-intervals.audit=2s")
                 .run((context) -> assertThat(context).hasFailed().getFailure().rootCause()
                         .hasMessageContaining("refreshIntervals names queue 'audit'"));
     }
 
     @Test
     void bindsConsumeMode() {
-        this.runner.withPropertyValues("pgmq.consumer.consume-mode=transactional-pop", "pgmq.consumer.transactional=true")
+        this.runner.withPropertyValues("pgmq.consumer.consume-mode=transactional-pop",
+                "pgmq.consumer.transactional=true")
                 .run((context) -> assertThat(context.getBean(ConsumerOptions.class).getConsumeMode())
                         .isEqualTo(ConsumeMode.TRANSACTIONAL_POP));
         this.runner.withPropertyValues("pgmq.consumer.consume-mode=transactional-pop")
@@ -473,6 +477,60 @@ class PgmqAutoConfigurationTests {
     }
 
     @Test
+    void healthAndMetricsWorkWithACustomClientAndNoDataSource() {
+        new ApplicationContextRunner()
+                .withConfiguration(AutoConfigurations.of(
+                        PgmqAutoConfiguration.class,
+                        PgmqHealthAutoConfiguration.class,
+                        PgmqMetricsAutoConfiguration.class))
+                .withUserConfiguration(CustomBeansConfiguration.class, MeterRegistryConfiguration.class)
+                .run((context) -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context).hasSingleBean(PgmqHealthIndicator.class);
+                    assertThat(context).hasSingleBean(PgmqMetrics.class);
+                    assertThat(context).doesNotHaveBean(PgmqInitializer.class);
+                });
+    }
+
+    @Test
+    void healthAndMetricsBackOffWhenPgmqIsDisabled() {
+        new ApplicationContextRunner()
+                .withConfiguration(AutoConfigurations.of(
+                        PgmqAutoConfiguration.class,
+                        PgmqHealthAutoConfiguration.class,
+                        PgmqMetricsAutoConfiguration.class))
+                .withUserConfiguration(CustomBeansConfiguration.class, MeterRegistryConfiguration.class)
+                .withPropertyValues("pgmq.enabled=false")
+                .run((context) -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context).doesNotHaveBean(PgmqHealthIndicator.class);
+                    assertThat(context).doesNotHaveBean(PgmqMetrics.class);
+                    assertThat(context).doesNotHaveBean(PgmqQueueGauges.class);
+                });
+    }
+
+    @Test
+    void anApplicationDefinedMetricsBeanRecordsSends() {
+        String queue = PgmqContainerSupport.uniqueQueueName("custom_metrics");
+        this.runner.withUserConfiguration(CustomMetricsConfiguration.class)
+                .withPropertyValues("pgmq.queues[0].name=" + queue)
+                .run((context) -> {
+                    context.getBean(PgmqTemplate.class).send(queue, "counted");
+                    MeterRegistry registry = context.getBean(CustomMetricsConfiguration.class).registry;
+                    assertThat(registry.get("pgmq.messages.sent").tag("queue", queue).counter().count())
+                            .isEqualTo(1.0);
+                });
+    }
+
+    @Test
+    void anAmbiguousDataSourceFailsWithAHintToSetPgmqDatasource() {
+        this.runner.withBean("otherDataSource", DataSource.class,
+                () -> new DelegatingDataSource(PgmqContainerSupport.dataSource()))
+                .run((context) -> assertThat(context).hasFailed().getFailure()
+                        .hasStackTraceContaining("set pgmq.datasource"));
+    }
+
+    @Test
     void metricsCanBeDisabled() {
         this.runner.withUserConfiguration(MeterRegistryConfiguration.class)
                 .withPropertyValues("pgmq.metrics.enabled=false")
@@ -491,6 +549,22 @@ class PgmqAutoConfigurationTests {
         @Bean(destroyMethod = "")
         DataSource dataSource() {
             return PgmqContainerSupport.dataSource();
+        }
+    }
+
+    @Configuration(proxyBeanMethods = false)
+    static class CustomMetricsConfiguration {
+
+        final MeterRegistry registry = new SimpleMeterRegistry();
+
+        @Bean
+        MeterRegistry meterRegistry() {
+            return this.registry;
+        }
+
+        @Bean
+        PgmqMetrics pgmqMetrics() {
+            return new PgmqMetrics(this.registry);
         }
     }
 

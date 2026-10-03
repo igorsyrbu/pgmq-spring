@@ -18,6 +18,8 @@
 
 package io.github.pgmqspring.core;
 
+import org.jspecify.annotations.Nullable;
+
 /**
  * Thrown when an operation requires a PGMQ feature that the installed version does not provide -
  * for example topic routing or grouped (FIFO) reads against PGMQ&nbsp;1.5.
@@ -28,9 +30,13 @@ public class UnsupportedPgmqFeatureException extends PgmqException {
 
     private static final long serialVersionUID = 1L;
 
-    public UnsupportedPgmqFeatureException(String feature, PgmqVersion installed, PgmqVersion required) {
+    /**
+     * @param installed the installed version, or {@code null} for a SQL-only installation, which
+     *     records none
+     */
+    public UnsupportedPgmqFeatureException(String feature, @Nullable PgmqVersion installed, PgmqVersion required) {
         super("PGMQ feature '" + feature + "' requires PGMQ " + required + " or later, but the database has "
-                + installed);
+                + (installed != null ? installed : "a SQL-only installation without that feature"));
     }
 
     public UnsupportedPgmqFeatureException(String message) {

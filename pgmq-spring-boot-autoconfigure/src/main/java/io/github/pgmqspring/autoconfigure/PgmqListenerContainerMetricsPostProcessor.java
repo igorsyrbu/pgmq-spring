@@ -43,7 +43,7 @@ class PgmqListenerContainerMetricsPostProcessor implements BeanPostProcessor {
     @Override
     public Object postProcessAfterInitialization(Object bean, String beanName) {
         if (bean instanceof PgmqMessageListenerContainer<?> container) {
-            PgmqMetrics listener = this.metrics.getIfAvailable();
+            PgmqMetrics listener = this.metrics.getIfUnique();
             if (listener != null) {
                 container.addListener(listener);
             }

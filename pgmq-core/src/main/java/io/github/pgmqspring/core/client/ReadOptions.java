@@ -22,6 +22,7 @@ import java.time.Duration;
 import java.util.Map;
 
 import org.jspecify.annotations.Nullable;
+import org.springframework.util.Assert;
 
 /**
  * Options for a read operation.
@@ -37,7 +38,8 @@ public final class ReadOptions {
 
     private static final Duration DEFAULT_VISIBILITY_TIMEOUT = Duration.ofSeconds(30);
 
-    private static final ReadOptions DEFAULTS = new ReadOptions(DEFAULT_VISIBILITY_TIMEOUT, 1, null, null, null);
+    private static final ReadOptions DEFAULTS =
+            new ReadOptions(DEFAULT_VISIBILITY_TIMEOUT, 1, null, null, null, GroupReadStrategy.GREEDY);
 
     private final Duration visibilityTimeout;
 
@@ -50,15 +52,6 @@ public final class ReadOptions {
     private final @Nullable Map<String, Object> conditional;
 
     private final GroupReadStrategy groupStrategy;
-
-    private ReadOptions(
-            Duration visibilityTimeout,
-            int batchSize,
-            @Nullable Duration longPoll,
-            @Nullable Duration pollInterval,
-            @Nullable Map<String, Object> conditional) {
-        this(visibilityTimeout, batchSize, longPoll, pollInterval, conditional, GroupReadStrategy.GREEDY);
-    }
 
     private ReadOptions(
             Duration visibilityTimeout,
@@ -90,6 +83,7 @@ public final class ReadOptions {
      * other consumers before it becomes deliverable again.
      */
     public ReadOptions visibilityTimeout(Duration timeout) {
+        Assert.notNull(timeout, "timeout must not be null");
         return new ReadOptions(timeout, this.batchSize, this.longPoll, this.pollInterval, this.conditional,
                 this.groupStrategy);
     }
@@ -104,17 +98,19 @@ public final class ReadOptions {
     }
 
     /**
-     * Returns a copy that long-polls for up to {@code maxWait}.
-     *
-     * @see ReadOptions the class-level note on connection-pool sizing
+     * Returns a copy that long-polls for up to {@code maxWait}. Mind the connection-pool sizing
+     * described on this class.
      */
     public ReadOptions longPoll(Duration maxWait) {
+        Assert.notNull(maxWait, "maxWait must not be null");
         return new ReadOptions(this.visibilityTimeout, this.batchSize, maxWait, this.pollInterval, this.conditional,
                 this.groupStrategy);
     }
 
     /** Returns a copy that long-polls for {@code maxWait}, re-checking every {@code interval}. */
     public ReadOptions longPoll(Duration maxWait, Duration interval) {
+        Assert.notNull(maxWait, "maxWait must not be null");
+        Assert.notNull(interval, "interval must not be null");
         return new ReadOptions(this.visibilityTimeout, this.batchSize, maxWait, interval, this.conditional,
                 this.groupStrategy);
     }
@@ -124,8 +120,9 @@ public final class ReadOptions {
      * (PGMQ's {@code conditional} argument, evaluated with the {@code @>} containment operator).
      */
     public ReadOptions conditional(Map<String, Object> filter) {
-        return new ReadOptions(this.visibilityTimeout, this.batchSize, this.longPoll, this.pollInterval, filter,
-                this.groupStrategy);
+        Assert.notNull(filter, "filter must not be null");
+        return new ReadOptions(this.visibilityTimeout, this.batchSize, this.longPoll, this.pollInterval,
+                Map.copyOf(filter), this.groupStrategy);
     }
 
     /**
@@ -133,6 +130,7 @@ public final class ReadOptions {
      * {@link PgmqOperations#readGrouped(String, ReadOptions)}. Ignored by a plain read.
      */
     public ReadOptions groupStrategy(GroupReadStrategy strategy) {
+        Assert.notNull(strategy, "strategy must not be null");
         return new ReadOptions(this.visibilityTimeout, this.batchSize, this.longPoll, this.pollInterval,
                 this.conditional, strategy);
     }

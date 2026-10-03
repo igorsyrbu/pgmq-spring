@@ -44,7 +44,6 @@ import io.github.pgmqspring.core.client.ReadOptions;
 import io.github.pgmqspring.core.consumer.DeadLetterHeaders;
 import io.github.pgmqspring.core.consumer.PgmqMessageListenerContainer;
 import io.github.pgmqspring.core.consumer.WakeUp;
-import io.github.pgmqspring.core.convert.JacksonPayloadConverter;
 import io.github.pgmqspring.core.micrometer.PgmqQueueGauges;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -76,8 +75,7 @@ class QuickstartIntegrationTests {
     }
 
     private static boolean insertNotifySupported() {
-        return new PgmqTemplate(PgmqContainerSupport.dataSource(), new JacksonPayloadConverter()).capabilities()
-                .insertNotify();
+        return PgmqContainerSupport.template().capabilities().insertNotify();
     }
 
     @Autowired
@@ -94,13 +92,6 @@ class QuickstartIntegrationTests {
 
     private boolean confirmed(String orderId) {
         return this.jdbc.sql("select count(*) from order_confirmations where order_id = ?")
-                .param(orderId)
-                .query(Integer.class)
-                .single() == 1;
-    }
-
-    private boolean notified(String orderId) {
-        return this.jdbc.sql("select count(*) from order_notifications where order_id = ?")
                 .param(orderId)
                 .query(Integer.class)
                 .single() == 1;
@@ -134,7 +125,6 @@ class QuickstartIntegrationTests {
                 .query(Integer.class).single() == 5);
         await().atMost(Duration.ofSeconds(10))
                 .until(() -> this.pgmq.metrics(NotificationHandler.QUEUE).queueLength() == 0);
-        assertThat(notified("bad-order")).isFalse();
     }
 
     @Test

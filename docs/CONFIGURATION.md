@@ -41,10 +41,11 @@ metadata, so an IDE completes and documents them. The one exception is the field
 |---|---|---|---|
 | `pgmq.enabled` | boolean | `true` | Master switch. `false` backs off the whole auto-configuration: no client, initializer, health indicator or metrics. |
 | `pgmq.datasource` | string | *primary* | Name of the `DataSource` bean the client uses. Leave unset to use the primary one. A different data source keeps queues in another database, **at the cost of the transactional-outbox guarantee** between queue writes and entity writes. |
-| `pgmq.create-extension` | boolean | `true` | Create the `pgmq` extension on startup when the database does not have it. Nothing is executed when PGMQ is already installed - as an extension or through its SQL-only script - so it costs nothing in production. Needs the `CREATE` privilege on the database; without it, startup fails with the database's reason. Several instances starting together are handled. Turn it off where extensions are managed by migrations or a DBA. |
+| `pgmq.create-extension` | boolean | `true` | Create the `pgmq` extension on startup when the database does not have it. Nothing is executed when PGMQ is already installed - as an extension or through its SQL-only script - so it costs nothing in production. Needs the `CREATE` privilege on the database; without it, startup fails with the database's reason. The extension is created through `pgmq.datasource` or the primary `DataSource` - the database the client uses, unless the application supplies its own `PgmqOperations`. Several instances starting together are handled. Turn it off where extensions are managed by migrations or a DBA. |
 | `pgmq.verify-on-startup` | boolean | `true` | Check during context startup that PGMQ is installed and at least `minimum-version`. Failure stops the application before it serves traffic. |
 | `pgmq.minimum-version` | string | `1.5.0` | Lowest acceptable PGMQ version, as `major.minor.patch`. Startup fails on an older installation. Setting it below 1.5.0 does not make older versions work: 1.5.0 is the oldest the library supports. For a SQL-only installation (no `pg_extension` row), the check falls back to requiring message headers, which 1.5.0 introduced. |
 | `pgmq.queues` | list | empty | Queues to create on startup if absent; see below. |
+| `pgmq.consumers` | map | empty | Listener containers to create from configuration, by name; see [Declared consumers](#declared-consumers-pgmqconsumersname). |
 
 ### Queues created on startup (`pgmq.queues[]`)
 
@@ -71,8 +72,8 @@ pgmq:
 | `kind` | enum | `standard` | `standard` - a logged table. `unlogged` - faster, but **emptied by a crash or failover**; for data you can afford to lose. `partitioned` - partitioned by `pg_partman`, which must be installed. |
 | `partition-interval` | string | `10000` | `partitioned` only. A number partitions by message id range; an interval such as `1 day` partitions by time. |
 | `retention-interval` | string | `100000` | `partitioned` only. How many ids, or how much time, to keep before `pg_partman` drops old partitions. |
-| `notify-on-insert` | boolean | `false` | Make PGMQ notify on every insert into this queue (`pgmq.enable_notify_insert`), which consumers with `wake-up=notify` wait for. Enabled at startup only when it is off or its throttle differs, because enabling recreates a trigger that briefly locks the table against inserts. `false` leaves the queue's current setting alone. Requires PGMQ 1.10.0; startup fails on an older one. |
-| `notify-throttle` | duration | *PGMQ's 250ms* | With `notify-on-insert`, at most one notification per this interval. PGMQ **drops** the notifications of inserts within it rather than delaying them; a `notify` consumer covers that by polling briefly after every wake-up. `0` disables throttling. |
+| `notify-on-insert` | boolean | `false` | Make PGMQ notify on every insert into this queue (`pgmq.enable_notify_insert`), which consumers with `wake-up=notify` wait for. Enabled at startup only when it is off, or when `notify-throttle` is set and differs from the current one, because enabling recreates a trigger that briefly locks the table against inserts. `false` leaves the queue's current setting alone. Requires PGMQ 1.10.0; startup fails on an older one. |
+| `notify-throttle` | duration | *unset* | With `notify-on-insert`, at most one notification per this interval. Unset keeps the queue's current throttle, or PGMQ's default of 250ms when notifications are being enabled. PGMQ **drops** the notifications of inserts within it rather than delaying them; a `notify` consumer covers that by polling briefly after every wake-up. `0` disables throttling. |
 | `fifo-index` | boolean | `false` | Also create the index PGMQ's grouped reads use. Enable it for every queue consumed with `group-ordered=true`; without it each grouped poll scans the table. Requires PGMQ 1.10.0. |
 
 Creation is idempotent, so the list is safe to apply on every start. An existing queue is left
@@ -86,7 +87,7 @@ Applied to the auto-configured `PgmqTemplate`; a hand-built one has the same set
 | Property | Type | Default | Setter | Description |
 |---|---|---|---|---|
 | `pgmq.producer.default-headers` | map | empty | `setDefaultHeaders(Map)` | Headers added to every message sent - single sends and every message of a batch - such as the sending service or a schema version. A header of the same name in the `SendOptions` wins, and an `OutboundMessage`'s own header wins over both. Dead-lettering sends through the same client, so a dead-lettered message also gets any default header its original lacked. Use bracket notation for names with dots: `pgmq.producer.default-headers.[app.version]`. |
-| `pgmq.producer.max-batch-size` | int | *unset* | `setMaxBatchSize(Integer)` | Most messages per `send_batch` statement. A longer `sendBatch`, `sendRawBatch` or `sendMessages` list is split into several statements, bounding the size of each statement's JSON parameter and the work one statement does. The chunks of a call stay **atomic**: they join the caller's transaction when one is bound to the client's `DataSource`, and otherwise run in a transaction of their own. Ids come back in input order, and `pgmq.send.duration` records one sample per statement. Unset sends every batch as one statement. At least 1 when set. |
+| `pgmq.producer.max-batch-size` | int | *unset* | `setMaxBatchSize(Integer)` | Most messages per `send_batch` statement. A longer `sendBatch`, `sendRawBatch` or `sendMessages` list is split into several statements, bounding the size of each statement's JSON parameter and the work one statement does. The chunks of a call stay **atomic**: they join the caller's transaction when one is bound to the client's `DataSource`, and otherwise run in a transaction of their own. Ids come back in input order, and `pgmq.send.duration` and `pgmq.messages.sent` record one sample and one notification per send call, after all its chunks. Unset sends every batch as one statement. At least 1 when set. |
 
 ### Consumer defaults (`pgmq.consumer.*`)
 
@@ -122,7 +123,7 @@ see [how they reach a container](#how-consumer-properties-reach-a-container).
 | `group-ordered` | boolean | `false` | Read with PGMQ's grouped reads: per `x-pgmq-group` value, at most one message is in flight across all consumers and messages arrive in send order. Messages without the header share one implicit group. Requires PGMQ 1.10.0; pair with `pgmq.queues[].fifo-index`. |
 | `group-strategy` | enum | `head` | How a grouped read fills a batch. `head` - at most one message per group, so a batch never holds two from one key (the only strategy where per-key order survives any handler). `greedy` - fills from the oldest group first. `round-robin` - interleaves groups so one busy key cannot monopolise a batch. Ignored unless `group-ordered`. |
 
-Invalid combinations fail at startup with a message naming the property, for example
+Invalid combinations fail at startup with a message naming the property prefix, such as `pgmq.consumer: ...` or `pgmq.consumers.<name>: ...`, for example
 `failure-action=dead-letter` without `dead-letter-queue`, `poll-delay: 0`, `long-poll: 500ms`, or
 `batch-acknowledgements` together with `transactional`.
 
@@ -165,7 +166,7 @@ any container bean. Invalid options fail startup with a message naming the entry
 | Property | Type | Default | Description |
 |---|---|---|---|
 | `pgmq.health.enabled` | boolean | `true` | Contribute the `pgmq` health indicator. Boot's `management.health.pgmq.enabled` switches it off too. Requires `spring-boot-health` on the classpath. |
-| `pgmq.health.queues` | list | empty | Queues whose depth the indicator reports. Empty means only reachability, presence and version are checked - which keeps a load balancer's probe cheap. A listed queue that does not exist is reported as a detail and does not turn the indicator DOWN. |
+| `pgmq.health.queues` | list | empty | Queues whose depth the indicator reports. Empty means only reachability, presence and version are checked - which keeps a load balancer's probe cheap. Each listed queue costs one `pgmq.metrics()` call, which scans the queue table, per health check. A listed queue that does not exist is reported as a detail and does not turn the indicator DOWN. |
 | `pgmq.health.max-queue-depth` | long | `-1` | Report DOWN when any monitored queue holds more than this many messages. Negative disables the threshold. Think twice before using it for a liveness probe: a backlog is rarely fixed by a restart. |
 
 ### Metrics (`pgmq.metrics.*`)
@@ -333,8 +334,8 @@ outside the application context needs `.listener(pgmqMetrics)` instead.
 
 | Meter | Type | Extra tags | Meaning |
 |---|---|---|---|
-| `pgmq.messages.sent` | counter | | Messages written. |
-| `pgmq.send.duration` | timer | | One send statement; a batch send is one statement. |
+| `pgmq.messages.sent` | counter | | Messages written, counted once per send call after all its chunks. |
+| `pgmq.send.duration` | timer | | One send call: a batch is one sample, recorded after all its chunks when it is split by `max-batch-size`. |
 | `pgmq.messages.received` | counter | | Messages read by a container. |
 | `pgmq.messages.acknowledged` | counter | | Handler returned normally. |
 | `pgmq.messages.failed` | counter | `exception` | Handler threw, or the payload could not be converted. |
@@ -372,7 +373,14 @@ Every bean is `@ConditionalOnMissingBean`; declare your own to replace it.
 | `ConsumerOptions` | Bound from `pgmq.consumer.*`. |
 | `PgmqInitializer` | Startup verification and queue creation. |
 | `PgmqHealthIndicator` (name `pgmqHealthIndicator`) | See above. |
-| `PgmqMetrics`, `PgmqQueueGauges` | Micrometer meters. |
+| `PgmqMetrics`, `PgmqQueueGauges` | Micrometer meters. A `PgmqMetrics` bean of your own is attached to the `PgmqTemplate` and to every container, as long as it is the only one. |
+
+Declared consumers are not covered by this:
+
+- `PgmqDeclaredConsumersRegistrar` is not replaceable.
+- A bean named `pgmqConsumer-<name>` that already exists is an error.
+- A `ConsumerOptions` bean of your own does not affect declared consumers; they are configured by properties alone.
+- They are created from the `Environment` at runtime, so they are not supported under Spring AOT or in native images.
 
 ## Durations and PGMQ's whole seconds
 

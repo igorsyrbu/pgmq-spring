@@ -18,25 +18,26 @@
 
 package io.github.pgmqspring.core.consumer;
 
-import java.lang.reflect.Proxy;
 import java.time.Duration;
 import java.util.List;
-import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
-import javax.sql.DataSource;
-
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 import org.springframework.jdbc.core.JdbcTemplate;
 
+import io.github.pgmqspring.core.ListenerContainers;
 import io.github.pgmqspring.core.PgmqContainerSupport;
+import io.github.pgmqspring.core.PgmqMessage;
+import io.github.pgmqspring.core.RecordingOperations;
 import io.github.pgmqspring.core.UnsupportedPgmqFeatureException;
 import io.github.pgmqspring.core.client.PgmqOperations;
 import io.github.pgmqspring.core.client.PgmqTemplate;
-import io.github.pgmqspring.core.convert.JacksonPayloadConverter;
 
+import static io.github.pgmqspring.core.PgmqContainerSupport.newQueue;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
@@ -58,31 +59,17 @@ class NotifyWakeUpIntegrationTests {
 
     private static JdbcTemplate jdbc;
 
-    private final ConcurrentLinkedQueue<PgmqMessageListenerContainer<?>> containers = new ConcurrentLinkedQueue<>();
+    @RegisterExtension
+    final ListenerContainers containers = new ListenerContainers();
 
     @BeforeAll
     static void setUp() {
-        DataSource dataSource = PgmqContainerSupport.dataSource();
-        pgmq = new PgmqTemplate(dataSource, new JacksonPayloadConverter());
-        jdbc = new JdbcTemplate(dataSource);
-    }
-
-    @AfterEach
-    void stopContainers() {
-        PgmqMessageListenerContainer<?> container;
-        while ((container = this.containers.poll()) != null) {
-            container.stop();
-        }
+        pgmq = PgmqContainerSupport.template();
+        jdbc = PgmqContainerSupport.jdbc();
     }
 
     private static boolean notifySupported() {
         return pgmq.capabilities().insertNotify();
-    }
-
-    private static String newQueue(String prefix) {
-        String queue = PgmqContainerSupport.uniqueQueueName(prefix);
-        pgmq.createQueue(queue);
-        return queue;
     }
 
     private static ConsumerOptions.Builder notifyOptions() {
@@ -93,12 +80,6 @@ class NotifyWakeUpIntegrationTests {
                 .shutdownTimeout(Duration.ofSeconds(5));
     }
 
-    private <T> PgmqMessageListenerContainer<T> start(PgmqMessageListenerContainer<T> container) {
-        this.containers.add(container);
-        container.start();
-        return container;
-    }
-
     /** Backend pids of connections listening for inserts into {@code queue}. */
     private static List<Integer> listeners(String queue) {
         return jdbc.queryForList("select pid from pg_stat_activity where query = ?", Integer.class,
@@ -106,7 +87,7 @@ class NotifyWakeUpIntegrationTests {
     }
 
     private PgmqMessageListenerContainer<String> recording(String queue, List<Long> handledAtMillis) {
-        return start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
+        return this.containers.start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
                 .options(notifyOptions().build())
                 .handler((message) -> handledAtMillis.add(System.currentTimeMillis()))
                 .build());
@@ -172,7 +153,7 @@ class NotifyWakeUpIntegrationTests {
         pgmq.enableNotifyInsert(queue);
         List<Long> deliveredAtMillis = new CopyOnWriteArrayList<>();
 
-        start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
+        this.containers.start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
                 .options(notifyOptions().retryDelay(Duration.ofSeconds(1)).build())
                 .handler((message) -> {
                     deliveredAtMillis.add(System.currentTimeMillis());
@@ -225,14 +206,21 @@ class NotifyWakeUpIntegrationTests {
     }
 
     @Test
-    void stoppingDoesNotWaitOutAPollDelay() {
+    void stoppingDoesNotWaitOutAPollDelay() throws Exception {
         String queue = newQueue("prompt_stop");
-        PgmqMessageListenerContainer<String> container = start(PgmqMessageListenerContainer
+        CountDownLatch polled = new CountDownLatch(1);
+        PgmqMessageListenerContainer<String> container = this.containers.start(PgmqMessageListenerContainer
                 .builder(pgmq, queue, String.class)
                 .options(ConsumerOptions.builder().pollDelay(FALLBACK_POLL).maxPollDelay(FALLBACK_POLL).build())
+                .listener(new ConsumerListener() {
+                    @Override
+                    public void onPolled(String polledQueue, List<? extends PgmqMessage<?>> messages) {
+                        polled.countDown();
+                    }
+                })
                 .handler((message) -> { })
                 .build());
-        await().pollDelay(Duration.ofMillis(500)).until(() -> true);
+        assertThat(polled.await(20, TimeUnit.SECONDS)).isTrue();
 
         long stoppingAt = System.currentTimeMillis();
         container.stop();
@@ -243,10 +231,10 @@ class NotifyWakeUpIntegrationTests {
     @Test
     void rejectsNotifyWhereItCannotWork() {
         assertThatIllegalArgumentException()
-                .isThrownBy(() -> ConsumerOptions.builder().wakeUp(WakeUp.NOTIFY).longPoll(Duration.ofSeconds(5)).build())
+                .isThrownBy(() -> ConsumerOptions.builder()
+                        .wakeUp(WakeUp.NOTIFY).longPoll(Duration.ofSeconds(5)).build())
                 .withMessageContaining("wakeUp=NOTIFY cannot be combined with longPoll");
-        PgmqOperations custom = (PgmqOperations) Proxy.newProxyInstance(getClass().getClassLoader(),
-                new Class<?>[] {PgmqOperations.class}, (proxy, method, args) -> method.invoke(pgmq, args));
+        PgmqOperations custom = new RecordingOperations(pgmq).proxy();
         assertThatIllegalArgumentException()
                 .isThrownBy(() -> PgmqMessageListenerContainer.builder(custom, "orders", String.class)
                         .options(ConsumerOptions.builder().wakeUp(WakeUp.NOTIFY).build())

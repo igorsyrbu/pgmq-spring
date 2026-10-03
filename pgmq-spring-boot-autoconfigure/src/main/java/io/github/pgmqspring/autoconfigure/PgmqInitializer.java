@@ -19,6 +19,8 @@
 package io.github.pgmqspring.autoconfigure;
 
 import java.time.Duration;
+import java.util.List;
+import java.util.function.BooleanSupplier;
 
 import javax.sql.DataSource;
 
@@ -31,12 +33,13 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import io.github.pgmqspring.core.PgmqCapabilities;
 import io.github.pgmqspring.core.PgmqExtension;
 import io.github.pgmqspring.core.PgmqVersion;
+import io.github.pgmqspring.core.QueueKind;
 import io.github.pgmqspring.core.QueueNames;
 import io.github.pgmqspring.core.client.PgmqOperations;
 
 /**
  * Runs PGMQ's startup checks: verify the extension is present and new enough, then create any
- * queues listed under {@code pgmq.queues}.
+ * queues listed under {@code pgmq.queues}, with the FIFO index and insert notifications they ask for.
  *
  * <p>This runs as an {@link InitializingBean} rather than an {@code ApplicationRunner} so that a
  * missing or too-old PGMQ fails context startup, before the application begins serving traffic.
@@ -59,8 +62,9 @@ public class PgmqInitializer implements InitializingBean {
 
     @Override
     public void afterPropertiesSet() {
-        PgmqOperations template = this.pgmq.getIfAvailable();
+        PgmqOperations template = this.pgmq.getIfUnique();
         if (template == null) {
+            logger.debug("Skipping PGMQ startup checks: there is not exactly one PgmqOperations bean");
             return;
         }
         if (this.properties.isCreateExtension()) {
@@ -75,10 +79,12 @@ public class PgmqInitializer implements InitializingBean {
             PgmqCapabilities capabilities = template.capabilities().verify(minimum);
             logger.info("Verified " + capabilities.describe());
         }
-        for (PgmqProperties.Queue queue : this.properties.getQueues()) {
+        List<PgmqProperties.Queue> queues = this.properties.getQueues();
+        for (int i = 0; i < queues.size(); i++) {
+            PgmqProperties.Queue queue = queues.get(i);
             String name = queue.getName();
             if (name == null || name.isBlank()) {
-                throw new IllegalStateException("every entry under pgmq.queues must have a name");
+                throw new IllegalStateException("pgmq.queues[" + i + "].name is required");
             }
             QueueNames.validate(name);
             ensureQueue(template, queue, name);
@@ -125,10 +131,11 @@ public class PgmqInitializer implements InitializingBean {
             return;
         }
         ensure(name, () -> {
-            switch (queue.getKind()) {
-                case PARTITIONED -> template.createPartitionedQueue(
-                        name, queue.getPartitionInterval(), queue.getRetentionInterval());
-                default -> template.createQueue(name, queue.getKind());
+            if (queue.getKind() == QueueKind.PARTITIONED) {
+                template.createPartitionedQueue(name, queue.getPartitionInterval(), queue.getRetentionInterval());
+            }
+            else {
+                template.createQueue(name, queue.getKind());
             }
         }, () -> template.queueExists(name));
     }
@@ -140,7 +147,7 @@ public class PgmqInitializer implements InitializingBean {
      * against a concurrent creator. A failure is therefore re-checked, and ignored when the object
      * now exists, so that instances starting together cannot fail on it.
      */
-    private static void ensure(String name, Runnable create, java.util.function.BooleanSupplier recovered) {
+    private static void ensure(String name, Runnable create, BooleanSupplier recovered) {
         try {
             create.run();
         }

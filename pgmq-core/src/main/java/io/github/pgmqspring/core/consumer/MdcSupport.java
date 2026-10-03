@@ -64,11 +64,6 @@ final class MdcSupport {
     private MdcSupport() {
     }
 
-    /** Whether SLF4J's MDC is available. */
-    static boolean available() {
-        return PUT != null;
-    }
-
     static void put(String key, String value) {
         if (PUT == null) {
             return;

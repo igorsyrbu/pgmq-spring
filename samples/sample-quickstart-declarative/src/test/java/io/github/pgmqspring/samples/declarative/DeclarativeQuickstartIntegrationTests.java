@@ -22,6 +22,7 @@ import java.time.Duration;
 
 import javax.sql.DataSource;
 
+import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -72,6 +73,11 @@ class DeclarativeQuickstartIntegrationTests {
         return this.jdbc.sql(sql).param(parameter).query(Integer.class).single();
     }
 
+    private static double acknowledged(MeterRegistry registry) {
+        Counter counter = registry.find("pgmq.messages.acknowledged").tag("queue", InvoiceService.INVOICES).counter();
+        return counter != null ? counter.count() : 0;
+    }
+
     private PgmqMessageListenerContainer<?> container(String name) {
         return this.applicationContext.getBean("pgmqConsumer-" + name, PgmqMessageListenerContainer.class);
     }
@@ -106,8 +112,15 @@ class DeclarativeQuickstartIntegrationTests {
 
     @Test
     void theAuditTrailIsConsumedInBatches() {
-        for (int i = 0; i < 30; i++) {
-            this.invoiceService.issue("inv-bulk-" + i, "customer-" + i, 100);
+        PgmqMessageListenerContainer<?> audit = container("audit");
+        audit.pause();
+        try {
+            for (int i = 0; i < 30; i++) {
+                this.invoiceService.issue("inv-bulk-" + i, "customer-" + i, 100);
+            }
+        }
+        finally {
+            audit.resume();
         }
 
         await().atMost(Duration.ofSeconds(45)).until(() ->
@@ -129,11 +142,11 @@ class DeclarativeQuickstartIntegrationTests {
 
     @Test
     void declaredConsumersAreInstrumentedLikeAnyOther() {
+        MeterRegistry registry = this.applicationContext.getBean(MeterRegistry.class);
+        double acknowledgedBefore = acknowledged(registry);
         this.invoiceService.issue("inv-metered", "alice", 1);
 
-        MeterRegistry registry = this.applicationContext.getBean(MeterRegistry.class);
-        await().atMost(Duration.ofSeconds(30)).until(() -> registry.find("pgmq.messages.acknowledged")
-                .tag("queue", InvoiceService.INVOICES).counter() != null);
+        await().atMost(Duration.ofSeconds(30)).until(() -> acknowledged(registry) > acknowledgedBefore);
     }
 
     @TestConfiguration(proxyBeanMethods = false)

@@ -25,6 +25,8 @@ import java.util.Map;
 
 import org.jspecify.annotations.Nullable;
 
+import io.github.pgmqspring.core.client.FifoGroups;
+
 /**
  * A message read from a PGMQ queue.
  *
@@ -79,10 +81,10 @@ public record PgmqMessage<T>(
     /**
      * Returns this message's FIFO group key, or {@code null} if it was sent without one.
      *
-     * @see io.github.pgmqspring.core.client.FifoGroups
+     * @see FifoGroups
      */
     public @Nullable String groupKey() {
-        Object value = header(io.github.pgmqspring.core.client.FifoGroups.GROUP_HEADER);
+        Object value = header(FifoGroups.GROUP_HEADER);
         return value != null ? value.toString() : null;
     }
 

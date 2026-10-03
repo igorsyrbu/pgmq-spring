@@ -116,7 +116,8 @@ class PgmqQueueGaugesTests {
                 .isThrownBy(() -> bind(List.of("orders"), Duration.ofSeconds(10), Map.of("orders", Duration.ZERO)))
                 .withMessageContaining("refreshIntervals[orders] must be positive");
         assertThatIllegalArgumentException()
-                .isThrownBy(() -> bind(List.of("orders"), Duration.ofSeconds(10), Map.of("audit", Duration.ofSeconds(1))))
+                .isThrownBy(() -> bind(List.of("orders"), Duration.ofSeconds(10),
+                        Map.of("audit", Duration.ofSeconds(1))))
                 .withMessageContaining("refreshIntervals names queue 'audit'");
     }
 }

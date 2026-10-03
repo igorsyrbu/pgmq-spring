@@ -32,6 +32,8 @@ import io.micrometer.core.instrument.Tags;
 import io.micrometer.core.instrument.binder.MeterBinder;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.jspecify.annotations.Nullable;
+import org.springframework.util.Assert;
 
 import io.github.pgmqspring.core.QueueMetrics;
 import io.github.pgmqspring.core.QueueNames;
@@ -92,6 +94,9 @@ public class PgmqQueueGauges implements MeterBinder {
 
     PgmqQueueGauges(PgmqOperations pgmq, List<String> queues, Duration refreshInterval,
             Map<String, Duration> refreshIntervals, LongSupplier clockMillis) {
+        Assert.notNull(pgmq, "pgmq must not be null");
+        Assert.notNull(queues, "queues must not be null");
+        Assert.notNull(refreshIntervals, "refreshIntervals must not be null");
         this.pgmq = pgmq;
         this.queues = List.copyOf(queues);
         this.defaultRefreshMillis = positiveMillis(refreshInterval, "refreshInterval");
@@ -109,9 +114,9 @@ public class PgmqQueueGauges implements MeterBinder {
         this.clockMillis = clockMillis;
     }
 
-    private static long positiveMillis(Duration interval, String name) {
-        if (interval == null || interval.isZero() || interval.isNegative()) {
-            throw new IllegalArgumentException(name + " must be positive, but was " + interval);
+    private static long positiveMillis(@Nullable Duration interval, String name) {
+        if (interval == null || interval.toMillis() < 1) {
+            throw new IllegalArgumentException(name + " must be positive, at least 1ms, but was " + interval);
         }
         return interval.toMillis();
     }

@@ -22,8 +22,6 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 
-import javax.sql.DataSource;
-
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -33,8 +31,9 @@ import io.github.pgmqspring.core.PgmqContainerSupport;
 import io.github.pgmqspring.core.PgmqMessage;
 import io.github.pgmqspring.core.QueueKind;
 import io.github.pgmqspring.core.QueueMetrics;
-import io.github.pgmqspring.core.convert.JacksonPayloadConverter;
 
+import static io.github.pgmqspring.core.PgmqContainerSupport.countRows;
+import static io.github.pgmqspring.core.PgmqContainerSupport.newQueue;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 
@@ -43,20 +42,11 @@ import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
  */
 class PgmqTemplateIntegrationTests {
 
-    private static DataSource dataSource;
-
     private static PgmqTemplate pgmq;
 
     @BeforeAll
     static void setUp() {
-        dataSource = PgmqContainerSupport.dataSource();
-        pgmq = new PgmqTemplate(dataSource, new JacksonPayloadConverter());
-    }
-
-    private String newQueue(String prefix) {
-        String queue = PgmqContainerSupport.uniqueQueueName(prefix);
-        pgmq.createQueue(queue);
-        return queue;
+        pgmq = PgmqContainerSupport.template();
     }
 
     record Order(String id, int quantity) {
@@ -202,9 +192,7 @@ class PgmqTemplateIntegrationTests {
         assertThat(pgmq.archive(queue, id)).isTrue();
 
         assertThat(pgmq.read(queue, ReadOptions.defaults(), Order.class)).isEmpty();
-        Integer archived = new org.springframework.jdbc.core.JdbcTemplate(dataSource)
-                .queryForObject("select count(*) from pgmq.a_" + queue, Integer.class);
-        assertThat(archived).isEqualTo(1);
+        assertThat(countRows("pgmq.a_" + queue)).isEqualTo(1);
     }
 
     @Test

@@ -149,9 +149,8 @@ final class InsertNotificationListener {
                 if (!pause(reconnectDelay)) {
                     return;
                 }
-                reconnectDelay = reconnectDelay.multipliedBy(2).compareTo(MAX_RECONNECT_DELAY) > 0
-                        ? MAX_RECONNECT_DELAY
-                        : reconnectDelay.multipliedBy(2);
+                Duration doubled = reconnectDelay.multipliedBy(2);
+                reconnectDelay = doubled.compareTo(MAX_RECONNECT_DELAY) > 0 ? MAX_RECONNECT_DELAY : doubled;
             }
             finally {
                 if (connection != null) {
@@ -198,7 +197,7 @@ final class InsertNotificationListener {
         }
     }
 
-    private boolean pause(Duration delay) {
+    private static boolean pause(Duration delay) {
         try {
             Thread.sleep(delay.toMillis());
             return true;

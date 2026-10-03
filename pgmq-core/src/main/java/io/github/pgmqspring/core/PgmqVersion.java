@@ -64,10 +64,15 @@ public record PgmqVersion(int major, int minor, int patch) implements Comparable
             return null;
         }
         String patch = matcher.group(3);
-        return new PgmqVersion(
-                Integer.parseInt(matcher.group(1)),
-                Integer.parseInt(matcher.group(2)),
-                patch != null ? Integer.parseInt(patch) : 0);
+        try {
+            return new PgmqVersion(
+                    Integer.parseInt(matcher.group(1)),
+                    Integer.parseInt(matcher.group(2)),
+                    patch != null ? Integer.parseInt(patch) : 0);
+        }
+        catch (NumberFormatException ex) {
+            return null;
+        }
     }
 
     /** Returns {@code true} if this version is greater than or equal to {@code other}. */

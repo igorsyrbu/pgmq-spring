@@ -27,18 +27,18 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.PlatformTransactionManager;
 
+import io.github.pgmqspring.core.ListenerContainers;
 import io.github.pgmqspring.core.PgmqContainerSupport;
 import io.github.pgmqspring.core.client.GroupReadStrategy;
 import io.github.pgmqspring.core.client.PgmqTemplate;
 import io.github.pgmqspring.core.client.SendOptions;
-import io.github.pgmqspring.core.convert.JacksonPayloadConverter;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
@@ -55,41 +55,26 @@ class GroupOrderedContainerIntegrationTests {
 
     private static PlatformTransactionManager transactionManager;
 
-    private final ConcurrentLinkedQueue<PgmqMessageListenerContainer<?>> containers =
-            new ConcurrentLinkedQueue<>();
+    @RegisterExtension
+    final ListenerContainers containers = new ListenerContainers();
 
     @BeforeAll
     static void setUp() {
-        pgmq = new PgmqTemplate(PgmqContainerSupport.dataSource(), new JacksonPayloadConverter());
+        pgmq = PgmqContainerSupport.template();
         transactionManager = new DataSourceTransactionManager(PgmqContainerSupport.dataSource());
         Assumptions.assumeTrue(pgmq.capabilities().groupedReads(),
                 "grouped reads require PGMQ 1.10.0+; installed: " + pgmq.capabilities().version());
     }
 
-    @AfterEach
-    void stopContainers() {
-        PgmqMessageListenerContainer<?> container;
-        while ((container = this.containers.poll()) != null) {
-            container.stop();
-        }
-    }
-
-    private String newQueue(String prefix) {
-        String queue = PgmqContainerSupport.uniqueQueueName(prefix);
-        pgmq.createQueue(queue);
+    private static String newFifoQueue(String prefix) {
+        String queue = PgmqContainerSupport.newQueue(prefix);
         pgmq.createFifoIndex(queue);
         return queue;
     }
 
-    private <T> PgmqMessageListenerContainer<T> start(PgmqMessageListenerContainer<T> container) {
-        this.containers.add(container);
-        container.start();
-        return container;
-    }
-
     @Test
     void neverHandlesOneKeyConcurrentlyAndKeepsItsOrder() throws Exception {
-        String queue = newQueue("grp_container");
+        String queue = newFifoQueue("grp_container");
         int users = 6;
         int perUser = 8;
         int total = users * perUser;
@@ -107,7 +92,7 @@ class GroupOrderedContainerIntegrationTests {
         ConcurrentLinkedQueue<String> outOfOrder = new ConcurrentLinkedQueue<>();
         CountDownLatch done = new CountDownLatch(total);
 
-        start(PgmqMessageListenerContainer.builder(pgmq, queue, Map.class)
+        this.containers.start(PgmqMessageListenerContainer.builder(pgmq, queue, Map.class)
                 .options(ConsumerOptions.builder()
                         .concurrency(5)
                         .batchSize(1)
@@ -142,14 +127,14 @@ class GroupOrderedContainerIntegrationTests {
 
     @Test
     void roundRobinKeepsABusyKeyFromStarvingOthers() {
-        String queue = newQueue("grp_fair");
+        String queue = newFifoQueue("grp_fair");
         for (int i = 0; i < 30; i++) {
             pgmq.send(queue, Map.of("i", i), SendOptions.none().group("noisy"));
         }
         pgmq.send(queue, Map.of("i", -1), SendOptions.none().group("quiet"));
 
         ConcurrentLinkedQueue<String> order = new ConcurrentLinkedQueue<>();
-        start(PgmqMessageListenerContainer.builder(pgmq, queue, Map.class)
+        this.containers.start(PgmqMessageListenerContainer.builder(pgmq, queue, Map.class)
                 .options(ConsumerOptions.builder()
                         .batchSize(5)
                         .groupOrdered(true)
@@ -168,10 +153,10 @@ class GroupOrderedContainerIntegrationTests {
 
     @Test
     void manualRetryAtDefersToAnAbsoluteInstant() {
-        String queue = newQueue("grp_retry_at");
+        String queue = newFifoQueue("grp_retry_at");
         AtomicInteger deliveries = new AtomicInteger();
 
-        start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
+        this.containers.start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
                 .options(ConsumerOptions.builder()
                         .acknowledgeMode(AcknowledgeMode.MANUAL)
                         .pollDelay(Duration.ofMillis(20))
@@ -194,10 +179,10 @@ class GroupOrderedContainerIntegrationTests {
 
     @Test
     void groupedModeWorksWithTransactionalProcessingAndLongPolling() {
-        String queue = newQueue("grp_tx_poll");
+        String queue = newFifoQueue("grp_tx_poll");
         CountDownLatch handled = new CountDownLatch(3);
 
-        start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
+        this.containers.start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
                 .options(ConsumerOptions.builder()
                         .groupOrdered(true)
                         .groupStrategy(GroupReadStrategy.HEAD)

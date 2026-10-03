@@ -28,6 +28,7 @@ import java.util.Set;
 
 import org.jspecify.annotations.Nullable;
 
+import io.github.pgmqspring.core.QueueNames;
 import io.github.pgmqspring.core.client.GroupReadStrategy;
 
 /**
@@ -729,7 +730,7 @@ public final class ConsumerOptions {
                         + "empty-queue polling, and a long poll would hold its connection through every notification");
             }
             if (this.deadLetterQueue != null) {
-                io.github.pgmqspring.core.QueueNames.validate(this.deadLetterQueue);
+                QueueNames.validate(this.deadLetterQueue);
             }
             if (this.concurrency < 1) {
                 throw new IllegalArgumentException("concurrency must be at least 1");

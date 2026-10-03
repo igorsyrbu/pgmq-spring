@@ -102,7 +102,8 @@ class StartupAndHealthHardeningTests {
             for (int i = 0; i < instances; i++) {
                 // Each "instance" has its own client, as separate JVMs would.
                 PgmqTemplate pgmq = new PgmqTemplate(PgmqContainerSupport.dataSource(), new JacksonPayloadConverter());
-                PgmqInitializer initializer = new PgmqInitializer(properties, provider(pgmq), PgmqContainerSupport.dataSource());
+                PgmqInitializer initializer =
+                        new PgmqInitializer(properties, provider(pgmq), PgmqContainerSupport.dataSource());
                 results.add(pool.submit(() -> {
                     go.await();
                     initializer.afterPropertiesSet();

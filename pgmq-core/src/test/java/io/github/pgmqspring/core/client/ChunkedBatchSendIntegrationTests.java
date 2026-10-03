@@ -27,10 +27,12 @@ import java.util.stream.IntStream;
 
 import javax.sql.DataSource;
 
+import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
@@ -52,17 +54,21 @@ class ChunkedBatchSendIntegrationTests {
 
     private DataSource dataSource;
 
+    /** The number of messages in each send_batch statement issued. */
     private final List<Integer> statementSizes = new CopyOnWriteArrayList<>();
+
+    /** The ids each listener notification reported. */
+    private final List<Integer> notifiedSizes = new CopyOnWriteArrayList<>();
 
     @BeforeEach
     void setUp() {
         this.dataSource = PgmqContainerSupport.dataSource();
-        this.pgmq = new PgmqTemplate(this.dataSource, new JacksonPayloadConverter());
-        this.jdbc = this.pgmq.getJdbcTemplate();
+        this.pgmq = new PgmqTemplate(new StatementCountingJdbcTemplate(this.dataSource), new JacksonPayloadConverter());
+        this.jdbc = new JdbcTemplate(this.dataSource);
         this.pgmq.setClientListener(new PgmqClientListener() {
             @Override
             public void onSent(String queue, List<Long> messageIds, Duration duration) {
-                ChunkedBatchSendIntegrationTests.this.statementSizes.add(messageIds.size());
+                ChunkedBatchSendIntegrationTests.this.notifiedSizes.add(messageIds.size());
             }
         });
     }
@@ -70,6 +76,24 @@ class ChunkedBatchSendIntegrationTests {
     @AfterEach
     void clearStatements() {
         this.statementSizes.clear();
+        this.notifiedSizes.clear();
+    }
+
+    /** Records how many messages each send_batch statement carried, from its payload array parameter. */
+    private final class StatementCountingJdbcTemplate extends JdbcTemplate {
+
+        StatementCountingJdbcTemplate(DataSource dataSource) {
+            super(dataSource);
+        }
+
+        @Override
+        public <T> List<T> query(String sql, RowMapper<T> rowMapper, @Nullable Object... args) {
+            if (sql.contains("pgmq.send_batch") && args != null && args[1] instanceof String payloads) {
+                Integer size = super.queryForObject("select jsonb_array_length(?::jsonb)", Integer.class, payloads);
+                ChunkedBatchSendIntegrationTests.this.statementSizes.add(size);
+            }
+            return super.query(sql, rowMapper, args);
+        }
     }
 
     private String newQueue(String prefix) {
@@ -95,6 +119,7 @@ class ChunkedBatchSendIntegrationTests {
         List<Long> ids = this.pgmq.sendBatch(queue, payloads(2500));
 
         assertThat(this.statementSizes).containsExactly(1000, 1000, 500);
+        assertThat(this.notifiedSizes).containsExactly(2500);
         assertThat(ids).hasSize(2500).isSorted().doesNotHaveDuplicates();
         List<Integer> sentOrder = this.jdbc.queryForList(
                 "select (message->>'n')::int from pgmq.q_" + queue + " order by msg_id", Integer.class);
@@ -108,6 +133,7 @@ class ChunkedBatchSendIntegrationTests {
         this.pgmq.sendBatch(queue, payloads(2500));
 
         assertThat(this.statementSizes).containsExactly(2500);
+        assertThat(this.notifiedSizes).containsExactly(2500);
         assertThat(this.pgmq.getMaxBatchSize()).isNull();
     }
 
@@ -122,7 +148,8 @@ class ChunkedBatchSendIntegrationTests {
         assertThatExceptionOfType(PgmqException.class).isThrownBy(() -> transaction.executeWithoutResult(
                 (status) -> this.pgmq.sendRawBatch(queue, json, SendOptions.none())));
 
-        assertThat(this.statementSizes).containsExactly(1000, 1000);
+        assertThat(this.statementSizes).containsExactly(1000, 1000, 500);
+        assertThat(this.notifiedSizes).isEmpty();
         assertThat(count(queue)).isZero();
     }
 
@@ -136,7 +163,8 @@ class ChunkedBatchSendIntegrationTests {
         assertThatExceptionOfType(PgmqException.class)
                 .isThrownBy(() -> this.pgmq.sendRawBatch(queue, json, SendOptions.none()));
 
-        assertThat(this.statementSizes).containsExactly(1000, 1000);
+        assertThat(this.statementSizes).containsExactly(1000, 1000, 500);
+        assertThat(this.notifiedSizes).isEmpty();
         assertThat(count(queue)).isZero();
     }
 

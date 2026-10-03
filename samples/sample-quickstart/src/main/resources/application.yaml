@@ -40,7 +40,6 @@ pgmq:
     refresh-intervals:
       orders: 2s
 
-
 logging:
   level:
     io.github.pgmqspring: INFO

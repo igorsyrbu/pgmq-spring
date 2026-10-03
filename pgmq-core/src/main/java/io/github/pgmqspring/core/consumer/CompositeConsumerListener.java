@@ -20,6 +20,7 @@ package io.github.pgmqspring.core.consumer;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.function.Consumer;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -97,7 +98,7 @@ public class CompositeConsumerListener implements ConsumerListener {
         each((delegate) -> delegate.onPollError(queue, error));
     }
 
-    private void each(java.util.function.Consumer<ConsumerListener> action) {
+    private void each(Consumer<ConsumerListener> action) {
         for (ConsumerListener delegate : this.delegates) {
             try {
                 action.accept(delegate);

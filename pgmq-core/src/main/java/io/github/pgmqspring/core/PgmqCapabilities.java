@@ -57,8 +57,7 @@ public record PgmqCapabilities(
     /** Throws if the named feature is unavailable. */
     public void require(boolean present, String feature, PgmqVersion since) {
         if (!present) {
-            throw new UnsupportedPgmqFeatureException(
-                    feature, this.version != null ? this.version : new PgmqVersion(0, 0, 0), since);
+            throw new UnsupportedPgmqFeatureException(feature, this.version, since);
         }
     }
 

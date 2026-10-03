@@ -50,8 +50,9 @@ import io.github.pgmqspring.core.consumer.ConsumerListener;
  * <tr><td>{@code pgmq.messages.failed}</td><td>counter</td><td>handlers that threw</td></tr>
  * <tr><td>{@code pgmq.messages.dead.lettered}</td><td>counter</td><td>messages moved to a dead-letter queue</td></tr>
  * <tr><td>{@code pgmq.messages.poison}</td><td>counter</td><td>messages that exceeded max-attempts</td></tr>
- * <tr><td>{@code pgmq.poll.errors}</td><td>counter</td><td>polls that failed, for example while the database is unreachable</td></tr>
- * <tr><td>{@code pgmq.send.duration}</td><td>timer</td><td>time spent in a send statement</td></tr>
+ * <tr><td>{@code pgmq.poll.errors}</td><td>counter</td>
+ *     <td>polls that failed, for example while the database is unreachable</td></tr>
+ * <tr><td>{@code pgmq.send.duration}</td><td>timer</td><td>time spent in one send call</td></tr>
  * <tr><td>{@code pgmq.processing.duration}</td><td>timer</td><td>time spent in a handler</td></tr>
  * </table>
  *
@@ -115,7 +116,7 @@ public class PgmqMetrics implements ConsumerListener, PgmqClientListener {
 
     @Override
     public void onFailure(String queue, PgmqMessage<?> message, Duration duration, Throwable error) {
-        counter(FAILED, "Messages whose handler threw", queue, "exception", error.getClass().getSimpleName())
+        counter(FAILED, "Messages whose handler threw", queue, "exception", exceptionTag(error))
                 .increment();
         recordProcessing(queue, "failure", duration);
     }
@@ -134,7 +135,13 @@ public class PgmqMetrics implements ConsumerListener, PgmqClientListener {
     @Override
     public void onPollError(String queue, Throwable error) {
         counter(POLL_ERRORS, "Polls that failed, for example while the database is unreachable", queue,
-                "exception", error.getClass().getSimpleName()).increment();
+                "exception", exceptionTag(error)).increment();
+    }
+
+    /** The exception's simple name; anonymous and lambda classes have none, so they get their full name. */
+    private static String exceptionTag(Throwable error) {
+        String simpleName = error.getClass().getSimpleName();
+        return simpleName.isEmpty() ? error.getClass().getName() : simpleName;
     }
 
     private void recordProcessing(String queue, String outcome, Duration duration) {

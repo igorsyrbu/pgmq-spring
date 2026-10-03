@@ -26,6 +26,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -80,7 +81,9 @@ import io.github.pgmqspring.core.client.SendOptions;
  * Because the count lives in the row rather than in the consumer, it survives restarts and is
  * shared across every instance of a scaled-out application. Once it exceeds
  * {@link ConsumerOptions.Builder#maxAttempts(int)} the handler is not invoked at all and the
- * terminal action is applied immediately.
+ * terminal action is applied immediately. With {@link ConsumeMode#TRANSACTIONAL_POP}, where
+ * {@code pop} does not count, a rolled-back attempt is counted into {@code read_ct} explicitly;
+ * with {@link ConsumeMode#POP} a failed message is gone, and nothing is retried.
  *
  * @param <T> the payload type
  */
@@ -94,6 +97,15 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
 
     private static final String MDC_READ_COUNT = "pgmq.readCount";
 
+    private static final ConsumerListener NO_LISTENER = new ConsumerListener() {
+    };
+
+    /** A lease is refreshed every third of the visibility timeout, but never more often than this. */
+    private static final long MIN_LEASE_REFRESH_MILLIS = 200;
+
+    /** How much longer than the shutdown timeout a caller waits for a drain already in progress. */
+    private static final long STOP_GRACE_MILLIS = 1000;
+
     private final PgmqOperations pgmq;
 
     private final String queue;
@@ -106,13 +118,10 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
 
     private final @Nullable PgmqBatchMessageHandler<T> batchHandler;
 
-    private final @Nullable TransactionTemplate transactionTemplate;
+    /** Makes dead-lettering atomic; untimed, unlike {@link #handlerTransactionTemplate}. */
+    private final @Nullable TransactionTemplate deadLetterTransactionTemplate;
 
-    /** Runs handlers; differs from {@link #transactionTemplate} only by the handler timeout. */
     private final @Nullable TransactionTemplate handlerTransactionTemplate;
-
-    private static final ConsumerListener NO_LISTENER = new ConsumerListener() {
-    };
 
     private volatile ConsumerListener listener;
 
@@ -133,6 +142,9 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
     /** With {@link WakeUp#NOTIFY}, wakes the loops when a retry this container scheduled is due. */
     private volatile @Nullable ScheduledExecutorService retryWakeUps;
 
+    /** The seconds, on the {@code nanoTime} scale, that a retry wake-up is already scheduled for. */
+    private final Set<Long> scheduledWakeUps = ConcurrentHashMap.newKeySet();
+
     private volatile @Nullable CountDownLatch stopped;
 
     private volatile @Nullable CountDownLatch keepAlive;
@@ -140,9 +152,9 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
     /** Released when the most recent stop has finished draining; {@code null} until the first stop. */
     private volatile @Nullable CountDownLatch drained;
 
-    private int phase = DEFAULT_PHASE - 100;
+    private volatile int phase = DEFAULT_PHASE - 100;
 
-    private boolean autoStartup = true;
+    private volatile boolean autoStartup = true;
 
     private final boolean verifyQueuesOnStart;
 
@@ -163,22 +175,25 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
         this.listener = builder.listener != null ? builder.listener : NO_LISTENER;
         this.beanName = "pgmqListener-" + this.queue;
         PlatformTransactionManager transactionManager = builder.transactionManager;
-        this.transactionTemplate = transactionManager != null ? new TransactionTemplate(transactionManager) : null;
+        this.deadLetterTransactionTemplate = transactionManager != null
+                ? new TransactionTemplate(transactionManager)
+                : null;
         this.handlerTransactionTemplate = transactionManager != null
                 ? handlerTransactionTemplate(transactionManager, this.options)
                 : null;
         Duration transactionTimeout = this.options.getTransactionTimeout();
-        if (transactionTimeout != null && transactionTimeout.compareTo(this.options.getVisibilityTimeout()) >= 0) {
+        if (transactionTimeout != null && transactionTimeout.compareTo(this.options.getVisibilityTimeout()) >= 0
+                && this.options.getConsumeMode() == ConsumeMode.READ && !this.options.isExtendLease()) {
             logger.warn("Queue '" + this.queue + "' has a transactionTimeout (" + transactionTimeout
                     + ") no shorter than its visibilityTimeout (" + this.options.getVisibilityTimeout()
                     + "), so a message can be redelivered while its handler's transaction is still open");
         }
-        if (this.options.isTransactional() && this.transactionTemplate == null) {
+        if (this.options.isTransactional() && transactionManager == null) {
             throw new IllegalArgumentException(
                     "transactional processing was requested for queue '" + this.queue
                             + "' but no PlatformTransactionManager was supplied");
         }
-        if (this.options.getFailureAction() == FailureAction.DEAD_LETTER && this.transactionTemplate == null) {
+        if (this.options.getFailureAction() == FailureAction.DEAD_LETTER && transactionManager == null) {
             logger.warn("Queue '" + this.queue + "' dead-letters without a PlatformTransactionManager. "
                     + "The send to the dead-letter queue and the delete from the source queue cannot be made "
                     + "atomic, so a crash between them can duplicate or strand a message. Supply a "
@@ -207,6 +222,8 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
 
     /** Creates a builder for a container reading {@code queue}. */
     public static <T> Builder<T> builder(PgmqOperations pgmq, String queue, Class<T> payloadType) {
+        Assert.notNull(pgmq, "pgmq must not be null");
+        Assert.notNull(payloadType, "payloadType must not be null");
         return new Builder<>(pgmq, queue, payloadType);
     }
 
@@ -262,17 +279,40 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
     // ---------------------------------------------------------------------
 
     @Override
-    public synchronized void start() {
+    public void start() {
         if (this.running.get()) {
             return;
         }
+        // A restart must not overlap the loops of a stop still draining.
+        awaitDrain();
+        // Outside the monitor: these run JDBC, which would pin a virtual thread on JDK 21-23.
         if (this.verifyQueuesOnStart) {
             verifyQueuesExist();
             if (this.options.getWakeUp() == WakeUp.NOTIFY) {
                 verifyInsertNotifications();
             }
         }
+        startPolling();
+    }
+
+    private synchronized void startPolling() {
+        if (this.running.get()) {
+            return;
+        }
         this.running.set(true);
+        try {
+            startResources();
+        }
+        catch (RuntimeException | Error ex) {
+            Resources started = beginStop();
+            if (started != null) {
+                finishStop(started);
+            }
+            throw ex;
+        }
+    }
+
+    private void startResources() {
         this.keepAlive = startKeepAlive();
         DataSource notificationDataSource = this.notificationDataSource;
         if (notificationDataSource != null) {
@@ -284,26 +324,35 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
                     VirtualThreads.factory(this.beanName + "-wake-"));
         }
         int concurrency = this.options.getConcurrency();
-        CountDownLatch latch = new CountDownLatch(concurrency);
-        this.stopped = latch;
-        ExecutorService pool = Executors.newFixedThreadPool(
-                concurrency, VirtualThreads.factory(this.beanName + "-"));
-        this.executor = pool;
         if (this.options.isExtendLease()) {
             // One refresh thread per polling loop: each loop holds at most one lease at a time, so a
             // refresh delayed by a slow database never makes another batch's refresh late.
             this.leaseExtender = Executors.newScheduledThreadPool(
                     concurrency, VirtualThreads.factory(this.beanName + "-lease-"));
         }
-        for (int i = 0; i < concurrency; i++) {
-            pool.execute(() -> {
-                try {
-                    pollLoop();
-                }
-                finally {
-                    latch.countDown();
-                }
-            });
+        CountDownLatch latch = new CountDownLatch(concurrency);
+        ExecutorService pool = Executors.newFixedThreadPool(
+                concurrency, VirtualThreads.factory(this.beanName + "-"));
+        this.executor = pool;
+        this.stopped = latch;
+        int submitted = 0;
+        try {
+            for (; submitted < concurrency; submitted++) {
+                pool.execute(() -> {
+                    try {
+                        pollLoop();
+                    }
+                    finally {
+                        latch.countDown();
+                    }
+                });
+            }
+        }
+        finally {
+            // Loops that never started must not hold up the drain of the stop that follows.
+            for (int i = submitted; i < concurrency; i++) {
+                latch.countDown();
+            }
         }
         logger.info("Started PGMQ listener for queue '" + this.queue + "' with concurrency " + concurrency
                 + (VirtualThreads.available() ? " on virtual threads" : " on platform threads"));
@@ -403,14 +452,20 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
         // Already stopping - typically an asynchronous stop(Runnable) from context shutdown. A
         // blocking stop() must not return while that drain is still running, or its caller would
         // proceed as if in-flight messages were finished.
+        awaitDrain();
+    }
+
+    /** Waits for the drain of the most recent stop, if one is still in progress. */
+    private void awaitDrain() {
         CountDownLatch draining = this.drained;
-        if (draining != null) {
-            try {
-                draining.await(this.options.getShutdownTimeout().toMillis() + 1000, TimeUnit.MILLISECONDS);
-            }
-            catch (InterruptedException ex) {
-                Thread.currentThread().interrupt();
-            }
+        if (draining == null || draining.getCount() == 0) {
+            return;
+        }
+        try {
+            draining.await(this.options.getShutdownTimeout().toMillis() + STOP_GRACE_MILLIS, TimeUnit.MILLISECONDS);
+        }
+        catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
         }
     }
 
@@ -421,13 +476,21 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
     @Override
     public void stop(Runnable callback) {
         Resources resources = beginStop();
-        if (resources == null) {
+        CountDownLatch draining = this.drained;
+        if (resources == null && (draining == null || draining.getCount() == 0)) {
             callback.run();
             return;
         }
+        // Even when another stop is already draining, the callback waits for it: the caller - the
+        // context closing - would otherwise tear down what the in-flight handlers still use.
         Thread drain = new Thread(() -> {
             try {
-                finishStop(resources);
+                if (resources != null) {
+                    finishStop(resources);
+                }
+                else {
+                    awaitDrain();
+                }
             }
             finally {
                 callback.run();
@@ -466,20 +529,16 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
             Thread.currentThread().interrupt();
         }
         finally {
-            if (resources.pool() != null) {
-                resources.pool().shutdownNow();
+            shutdownNow(resources.pool());
+            shutdownNow(resources.leaseExtender());
+            shutdownNow(resources.retryWakeUps());
+            CountDownLatch keepAlive = resources.keepAlive();
+            if (keepAlive != null) {
+                keepAlive.countDown();
             }
-            if (resources.leaseExtender() != null) {
-                resources.leaseExtender().shutdownNow();
-            }
-            if (resources.keepAlive() != null) {
-                resources.keepAlive().countDown();
-            }
-            if (resources.notifications() != null) {
-                resources.notifications().stop();
-            }
-            if (resources.retryWakeUps() != null) {
-                resources.retryWakeUps().shutdownNow();
+            InsertNotificationListener notifications = resources.notifications();
+            if (notifications != null) {
+                notifications.stop();
             }
             synchronized (this) {
                 // Only clear what this stop captured: start() may already have run again.
@@ -499,6 +558,12 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
         }
         resources.drained().countDown();
         logger.info("Stopped PGMQ listener for queue '" + this.queue + "'");
+    }
+
+    private static void shutdownNow(@Nullable ExecutorService executor) {
+        if (executor != null) {
+            executor.shutdownNow();
+        }
     }
 
     private record Resources(@Nullable CountDownLatch latch, @Nullable ExecutorService pool,
@@ -569,9 +634,13 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
     private void pollLoop() {
         Duration backoff = this.options.getPollDelay();
         int consecutiveFailures = 0;
-        while (this.running.get() && !Thread.currentThread().isInterrupted()) {
-            // Taken before the poll, so a wake-up that arrives while it runs is not missed.
+        while (true) {
+            // Taken before the running check and the poll, so neither a stop nor a wake-up that
+            // arrives meanwhile is missed by the wait that follows.
             long seen = this.wakeUp.generation();
+            if (!this.running.get() || Thread.currentThread().isInterrupted()) {
+                return;
+            }
             try {
                 if (this.paused.get()) {
                     this.wakeUp.await(this.options.getPollDelay(), seen);
@@ -583,16 +652,20 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
                             + " failed poll(s)");
                     consecutiveFailures = 0;
                 }
-                if (!found) {
-                    Duration wait = this.options.getLongPoll() != null ? backoff : withJitter(backoff);
-                    // After a wake-up, back off from the start again: polling briefly at short
-                    // intervals also finds messages whose notification PGMQ throttled away.
-                    backoff = this.wakeUp.await(wait, seen) ? this.options.getPollDelay() : nextBackoff(backoff);
+                if (found || this.options.getLongPoll() != null) {
+                    // An empty long poll has already waited, inside the database.
+                    backoff = this.options.getPollDelay();
                     continue;
                 }
-                backoff = this.options.getPollDelay();
+                // After a wake-up, back off from the start again: polling briefly at short
+                // intervals also finds messages whose notification PGMQ throttled away.
+                boolean wokenUp = this.wakeUp.await(withJitter(backoff), seen);
+                backoff = wokenUp ? this.options.getPollDelay() : nextBackoff(backoff);
             }
             catch (Throwable ex) {
+                if (interruptedByStop(ex)) {
+                    return;
+                }
                 // The invariant: on any unexpected failure we touch nothing, so whatever was read
                 // stays leased and is redelivered when its visibility timeout expires.
                 consecutiveFailures++;
@@ -607,9 +680,44 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
                     // An outage fails every poll of every loop; one stack trace per outage is enough.
                     logger.warn(message + " (" + consecutiveFailures + " consecutive failures, latest: " + ex + ")");
                 }
-                this.wakeUp.await(withJitter(this.options.getMaxPollDelay()), seen);
+                pauseAfterFailure(withJitter(this.options.getMaxPollDelay()));
             }
         }
+    }
+
+    /**
+     * Waits out the backoff after a failed poll. Only a stop cuts it short: waking on every
+     * notification would turn a persistent failure into a retry per insert.
+     */
+    private void pauseAfterFailure(Duration pause) {
+        long deadline = System.nanoTime() + pause.toNanos();
+        while (true) {
+            long seen = this.wakeUp.generation();
+            long remaining = deadline - System.nanoTime();
+            if (remaining <= 0 || !this.running.get() || Thread.currentThread().isInterrupted()) {
+                return;
+            }
+            this.wakeUp.await(Duration.ofNanos(remaining), seen);
+        }
+    }
+
+    /**
+     * Whether {@code error} comes from a stop interrupting work that outlasted the shutdown timeout:
+     * not a failure of the message, which is left for redelivery.
+     */
+    private boolean interruptedByStop(Throwable error) {
+        if (this.running.get()) {
+            return false;
+        }
+        if (Thread.currentThread().isInterrupted()) {
+            return true;
+        }
+        for (Throwable cause = error; cause != null; cause = cause.getCause()) {
+            if (cause instanceof InterruptedException) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Polls once and handles what the poll returned; whether it returned anything. */
@@ -617,14 +725,19 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
         if (this.options.getConsumeMode() == ConsumeMode.TRANSACTIONAL_POP) {
             return popInTransaction();
         }
-        List<PgmqMessage<String>> batch = poll();
+        if (this.options.getConsumeMode() == ConsumeMode.POP) {
+            List<PgmqMessage<String>> popped = this.pgmq.pop(this.queue, this.options.getBatchSize(), String.class);
+            safely(() -> this.listener.onPolled(this.queue, popped));
+            if (popped.isEmpty()) {
+                return false;
+            }
+            dispatchPopped(popped);
+            return true;
+        }
+        List<PgmqMessage<String>> batch = read();
         safely(() -> this.listener.onPolled(this.queue, batch));
         if (batch.isEmpty()) {
             return false;
-        }
-        if (this.options.getConsumeMode() == ConsumeMode.POP) {
-            dispatchPopped(batch);
-            return true;
         }
         if (this.paused.get() || !this.running.get()) {
             // A poll that was already in flight when pause() or stop() was called must not
@@ -639,10 +752,7 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
         return true;
     }
 
-    private List<PgmqMessage<String>> poll() {
-        if (this.options.getConsumeMode() == ConsumeMode.POP) {
-            return this.pgmq.pop(this.queue, this.options.getBatchSize(), String.class);
-        }
+    private List<PgmqMessage<String>> read() {
         ReadOptions readOptions = ReadOptions.defaults()
                 .batchSize(this.options.getBatchSize())
                 .visibilityTimeout(this.options.getVisibilityTimeout());
@@ -661,7 +771,7 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
 
     /** Makes messages immediately visible again, so pausing or stopping does not strand them. */
     private void release(List<PgmqMessage<String>> batch, Lease lease) {
-        List<Long> ids = batch.stream().map(PgmqMessage::id).toList();
+        List<Long> ids = ids(batch);
         ids.forEach(lease::settle);
         try {
             this.pgmq.setVisibilityTimeout(this.queue, ids, Duration.ZERO);
@@ -716,35 +826,62 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
             DefaultAcknowledgement acknowledgement = new DefaultAcknowledgement(message, lease);
             try {
                 if (this.options.isTransactional()) {
-                    requireTransactionTemplate().executeWithoutResult((status) -> {
+                    requireHandlerTransactionTemplate().executeWithoutResult((status) -> {
                         invokeHandler(message, acknowledgement);
                         applyAcknowledgeMode(message, acknowledgement, lease, pending);
                     });
                 }
                 else {
                     invokeHandler(message, acknowledgement);
-                    applyAcknowledgeMode(message, acknowledgement, lease, pending);
                 }
-                Duration took = Duration.between(startedAt, Instant.now());
-                safely(() -> this.listener.onSuccess(this.queue, message, took));
             }
             catch (Throwable ex) {
-                Duration took = Duration.between(startedAt, Instant.now());
-                safely(() -> this.listener.onFailure(this.queue, message, took, ex));
-                if (!this.options.isTransactional() && acknowledgement.isAcknowledged()) {
-                    // The handler settled the message and then threw. Outside a transaction that
-                    // settlement has already happened - the message may be deleted, or already in
-                    // the dead-letter queue - so applying the failure action as well would act on
-                    // it twice, for example dead-lettering a copy of a message that was deleted.
-                    logger.warn("Handler for message " + message.id() + " on queue '" + this.queue
-                            + "' threw after settling it; the settlement stands and no failure action is applied", ex);
-                    return;
-                }
-                logger.warn("Handler failed for message " + message.id() + " on queue '" + this.queue
-                        + "' (read count " + message.readCount() + ")", ex);
-                applyFailureAction(message, ex, lease);
+                onHandlerFailure(message, acknowledgement, ex, since(startedAt), lease);
+                return;
             }
+            if (!this.options.isTransactional()) {
+                acknowledgeHandled(List.of(message.id()),
+                        () -> applyAcknowledgeMode(message, acknowledgement, lease, pending));
+            }
+            safely(() -> this.listener.onSuccess(this.queue, message, since(startedAt)));
         });
+    }
+
+    private void onHandlerFailure(PgmqMessage<T> message, DefaultAcknowledgement acknowledgement, Throwable error,
+            Duration took, Lease lease) {
+        if (interruptedByStop(error)) {
+            logger.info("Handler for message " + message.id() + " on queue '" + this.queue + "' was interrupted by "
+                    + "shutdown; the message will be redelivered");
+            return;
+        }
+        safely(() -> this.listener.onFailure(this.queue, message, took, error));
+        if (!this.options.isTransactional() && acknowledgement.isAcknowledged()) {
+            // The handler settled the message and then threw. Outside a transaction that
+            // settlement has already happened - the message may be deleted, or already in
+            // the dead-letter queue - so applying the failure action as well would act on
+            // it twice, for example dead-lettering a copy of a message that was deleted.
+            logger.warn("Handler for message " + message.id() + " on queue '" + this.queue
+                    + "' threw after settling it; the settlement stands and no failure action is applied", error);
+            return;
+        }
+        logger.warn("Handler failed for message " + message.id() + " on queue '" + this.queue
+                + "' (read count " + message.readCount() + ")", error);
+        applyFailureAction(message, error, lease);
+    }
+
+    /**
+     * Acknowledges messages whose handler has already succeeded outside a transaction. A failure
+     * here is not the handler's: the messages are left for redelivery, as by any unexpected failure,
+     * rather than retried, archived or dead-lettered as though their handler had thrown.
+     */
+    private void acknowledgeHandled(List<Long> ids, Runnable acknowledgement) {
+        try {
+            acknowledgement.run();
+        }
+        catch (Throwable ex) {
+            logger.warn("Could not acknowledge handled message(s) " + ids + " on queue '" + this.queue
+                    + "'; they will be redelivered once their visibility timeout expires", ex);
+        }
     }
 
     private void dispatchBatch(List<PgmqMessage<String>> batch, Lease lease) {
@@ -764,45 +901,43 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
         if (deliverable.isEmpty()) {
             return;
         }
-        // A batch has no single message id or read count, but its log lines still carry the queue,
-        // as a single-message handler's do.
-        String previousQueue = MdcSupport.get(MDC_QUEUE);
-        MdcSupport.put(MDC_QUEUE, this.queue);
-        try {
-            handleDeliverableBatch(deliverable, lease);
-        }
-        finally {
-            restore(MDC_QUEUE, previousQueue);
-        }
+        withQueueMdc(() -> handleDeliverableBatch(deliverable, lease));
     }
 
     private void handleDeliverableBatch(List<PgmqMessage<T>> deliverable, Lease lease) {
         Instant startedAt = Instant.now();
+        PgmqBatchMessageHandler<T> handler = this.batchHandler;
+        Assert.state(handler != null, "no batch handler");
         try {
-            PgmqBatchMessageHandler<T> handler = this.batchHandler;
-            Assert.state(handler != null, "no batch handler");
             if (this.options.isTransactional()) {
-                requireTransactionTemplate().executeWithoutResult((status) -> {
+                requireHandlerTransactionTemplate().executeWithoutResult((status) -> {
                     invokeBatchHandler(handler, deliverable);
                     acknowledgeBatch(deliverable, lease);
                 });
             }
             else {
                 invokeBatchHandler(handler, deliverable);
-                acknowledgeBatch(deliverable, lease);
             }
-            Duration took = Duration.between(startedAt, Instant.now());
-            deliverable.forEach((message) -> safely(() -> this.listener.onSuccess(this.queue, message, took)));
         }
         catch (Throwable ex) {
-            Duration took = Duration.between(startedAt, Instant.now());
+            if (interruptedByStop(ex)) {
+                logger.info("Batch handler on queue '" + this.queue + "' was interrupted by shutdown; its "
+                        + deliverable.size() + " message(s) will be redelivered");
+                return;
+            }
+            Duration took = since(startedAt);
             logger.warn("Batch handler failed for " + deliverable.size() + " messages on queue '" + this.queue + "'",
                     ex);
             for (PgmqMessage<T> message : deliverable) {
                 safely(() -> this.listener.onFailure(this.queue, message, took, ex));
                 withMdc(message, () -> applyFailureAction(message, ex, lease));
             }
+            return;
         }
+        if (!this.options.isTransactional()) {
+            acknowledgeHandled(ids(deliverable), () -> acknowledgeBatch(deliverable, lease));
+        }
+        notifySuccess(deliverable, since(startedAt));
     }
 
     // ---------------------------------------------------------------------
@@ -815,14 +950,15 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
      * per transaction, because a popped batch cannot be partly rolled back.
      *
      * <p>A popped message that cannot be delivered - poison, or a payload that does not convert -
-     * rolls the whole transaction back. Its row is then restored, and it is retried, archived or
-     * dead-lettered exactly as in read mode; a deleted row could not be archived.
+     * is dead-lettered inside the same transaction when that is its fate, so no other consumer can
+     * pop it in between. Otherwise the transaction rolls back, restoring its row, and it is retried
+     * or archived exactly as in read mode: a popped row cannot be passed to {@code pgmq.archive}.
      */
     private boolean popInTransaction() {
         int count = this.batchHandler != null ? this.options.getBatchSize() : 1;
         PoppedBatch<T> popped = new PoppedBatch<>();
         try {
-            requireTransactionTemplate().executeWithoutResult((status) -> {
+            requireHandlerTransactionTemplate().executeWithoutResult((status) -> {
                 popped.messages = this.pgmq.pop(this.queue, count, String.class).stream()
                         .map(PgmqMessageListenerContainer::asAttempt)
                         .toList();
@@ -836,22 +972,29 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
                 }
                 for (PgmqMessage<String> raw : popped.messages) {
                     if (isPoison(raw)) {
-                        popped.undeliverable.put(raw, null);
+                        popped.undeliverable.add(new Undeliverable(raw, null, poisonReason(raw)));
                         continue;
                     }
                     try {
                         popped.deliverable.add(this.pgmq.convert(raw, this.payloadType));
                     }
                     catch (RuntimeException ex) {
-                        popped.undeliverable.put(raw, ex);
+                        popped.undeliverable.add(new Undeliverable(raw, ex, failureReason(raw, ex)));
                     }
                 }
                 if (!popped.undeliverable.isEmpty()) {
-                    status.setRollbackOnly();
-                    return;
+                    if (!canDeadLetterInTransaction(popped.undeliverable)) {
+                        status.setRollbackOnly();
+                        return;
+                    }
+                    popped.undeliverable.forEach((undeliverable) -> sendToDeadLetterQueue(undeliverable.message(),
+                            undeliverable.reason(), undeliverable.error()));
+                    popped.deadLetteredInTransaction = true;
                 }
-                popped.startedAt = Instant.now();
-                invokeHandlerOnPopped(popped.deliverable);
+                if (!popped.deliverable.isEmpty()) {
+                    popped.startedAt = Instant.now();
+                    invokeHandlerOnPopped(popped.deliverable);
+                }
             });
         }
         catch (RuntimeException | Error ex) {
@@ -868,33 +1011,56 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
         if (messages.isEmpty()) {
             return false;
         }
-        popped.undeliverable.forEach((raw, error) -> withMdc(raw, () -> {
-            if (error == null) {
-                handlePoison(raw, Lease.NONE);
-            }
-            else {
-                onUnconvertible(raw, error, Lease.NONE);
-            }
-        }));
+        for (Undeliverable undeliverable : popped.undeliverable) {
+            PgmqMessage<String> raw = undeliverable.message();
+            Throwable error = undeliverable.error();
+            withMdc(raw, () -> {
+                if (popped.deadLetteredInTransaction) {
+                    reportUndeliverable(raw, error);
+                    reportDeadLettered(raw, undeliverable.reason());
+                }
+                else if (error == null) {
+                    handlePoison(raw, Lease.NONE);
+                }
+                else {
+                    onUnconvertible(raw, error, Lease.NONE);
+                }
+            });
+        }
         Instant startedAt = popped.startedAt;
         if (startedAt != null) {
-            Duration took = Duration.between(startedAt, Instant.now());
-            popped.deliverable.forEach((message) -> safely(() -> this.listener.onSuccess(this.queue, message, took)));
+            notifySuccess(popped.deliverable, since(startedAt));
         }
         return true;
+    }
+
+    /** Whether every undeliverable message of a popped batch ends in the dead-letter queue now. */
+    private boolean canDeadLetterInTransaction(List<Undeliverable> undeliverable) {
+        return this.options.getFailureAction() == FailureAction.DEAD_LETTER
+                && undeliverable.stream().allMatch((message) -> message.error() == null
+                        || isExhausted(message.message(), message.error()));
+    }
+
+    private void reportUndeliverable(PgmqMessage<String> raw, @Nullable Throwable error) {
+        if (error == null) {
+            safely(() -> this.listener.onPoison(this.queue, raw));
+        }
+        else {
+            safely(() -> this.listener.onFailure(this.queue, raw, Duration.ZERO, error));
+        }
+    }
+
+    /**
+     * A popped message that cannot reach the handler, with the conversion error, or {@code null}
+     * when it is poison, and the reason it is dead-lettered for.
+     */
+    private record Undeliverable(PgmqMessage<String> message, @Nullable Throwable error, String reason) {
     }
 
     private void invokeHandlerOnPopped(List<PgmqMessage<T>> deliverable) {
         PgmqBatchMessageHandler<T> handler = this.batchHandler;
         if (handler != null) {
-            String previousQueue = MdcSupport.get(MDC_QUEUE);
-            MdcSupport.put(MDC_QUEUE, this.queue);
-            try {
-                invokeBatchHandler(handler, deliverable);
-            }
-            finally {
-                restore(MDC_QUEUE, previousQueue);
-            }
+            withQueueMdc(() -> invokeBatchHandler(handler, deliverable));
             return;
         }
         PgmqMessage<T> message = deliverable.get(0);
@@ -902,8 +1068,13 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
     }
 
     private void onPoppedHandlerFailure(PoppedBatch<T> popped, Throwable error) {
+        if (interruptedByStop(error)) {
+            logger.info("Handler on queue '" + this.queue + "' was interrupted by shutdown; the rollback returned its "
+                    + popped.deliverable.size() + " popped message(s) to the queue");
+            return;
+        }
         Instant startedAt = popped.startedAt;
-        Duration took = startedAt != null ? Duration.between(startedAt, Instant.now()) : Duration.ZERO;
+        Duration took = startedAt != null ? since(startedAt) : Duration.ZERO;
         logger.warn("Handler failed for " + popped.deliverable.size() + " popped message(s) on queue '" + this.queue
                 + "'; the transaction rolled back", error);
         for (PgmqMessage<T> message : popped.deliverable) {
@@ -944,11 +1115,10 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
             Instant startedAt = Instant.now();
             try {
                 invokeHandlerOnPopped(deliverable);
-                Duration took = Duration.between(startedAt, Instant.now());
-                deliverable.forEach((message) -> safely(() -> this.listener.onSuccess(this.queue, message, took)));
+                notifySuccess(deliverable, since(startedAt));
             }
             catch (Throwable ex) {
-                Duration took = Duration.between(startedAt, Instant.now());
+                Duration took = since(startedAt);
                 deliverable.forEach((message) -> lost(message, ex, took));
             }
             return;
@@ -966,11 +1136,10 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
                 Instant startedAt = Instant.now();
                 try {
                     invokeHandler(message, new DefaultAcknowledgement(message, Lease.NONE));
-                    Duration took = Duration.between(startedAt, Instant.now());
-                    safely(() -> this.listener.onSuccess(this.queue, message, took));
+                    safely(() -> this.listener.onSuccess(this.queue, message, since(startedAt)));
                 }
                 catch (Throwable ex) {
-                    lost(message, ex, Duration.between(startedAt, Instant.now()));
+                    lost(message, ex, since(startedAt));
                 }
             });
         }
@@ -1032,30 +1201,54 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
         return message.readCount() > this.options.getMaxAttempts();
     }
 
+    private boolean isExhausted(PgmqMessage<?> message, Throwable error) {
+        return this.options.isNonRetryable(error) || message.readCount() >= this.options.getMaxAttempts();
+    }
+
+    private String poisonReason(PgmqMessage<?> message) {
+        return "exceeded maxAttempts=" + this.options.getMaxAttempts() + " (read count " + message.readCount() + ")";
+    }
+
+    private String failureReason(PgmqMessage<?> message, Throwable error) {
+        Throwable cause = rootCause(error);
+        return (this.options.isNonRetryable(error)
+                ? "not retryable after "
+                : "exhausted maxAttempts=" + this.options.getMaxAttempts() + " after ")
+                + cause.getClass().getSimpleName() + (cause.getMessage() != null ? ": " + cause.getMessage() : "");
+    }
+
     private void handlePoison(PgmqMessage<?> message, Lease lease) {
         lease.settle(message.id());
         safely(() -> this.listener.onPoison(this.queue, message));
-        String reason = "exceeded maxAttempts=" + this.options.getMaxAttempts() + " (read count "
-                + message.readCount() + ")";
+        String reason = poisonReason(message);
         logger.error("Poison message " + message.id() + " on queue '" + this.queue + "': " + reason);
         try {
-            switch (this.options.getFailureAction()) {
-                case DEAD_LETTER -> deadLetter(message, reason, null);
-                case ARCHIVE -> this.pgmq.archive(this.queue, message.id());
-                case REDELIVER -> {
-                    // REDELIVER has no terminal state, so a poisoned message would loop forever.
-                    // Archiving is the least-bad option: it stops the loop without discarding data.
-                    logger.error("failureAction=REDELIVER cannot terminate poison message " + message.id()
-                            + " on queue '" + this.queue + "'; archiving it instead. Configure a dead-letter "
-                            + "queue to retain failure details.");
-                    this.pgmq.archive(this.queue, message.id());
-                }
-            }
+            applyTerminalAction(message, reason, null);
         }
         catch (Throwable ex) {
             // Must not abort the rest of the batch. The message stays put and is retried later.
             logger.error("Could not apply failureAction=" + this.options.getFailureAction() + " to poison message "
                     + message.id() + " on queue '" + this.queue + "'; it will be redelivered", ex);
+        }
+    }
+
+    /**
+     * Applies the terminal {@link FailureAction}. {@code REDELIVER} names no terminal state, so a
+     * message that reached it would loop for ever; archiving stops the loop without discarding it.
+     */
+    private void applyTerminalAction(PgmqMessage<?> message, String reason, @Nullable Throwable error) {
+        switch (this.options.getFailureAction()) {
+            case DEAD_LETTER -> moveToDeadLetterQueue(message, reason, error);
+            case ARCHIVE -> {
+                logger.error("Archiving message " + message.id() + " from queue '" + this.queue + "': " + reason);
+                this.pgmq.archive(this.queue, message.id());
+            }
+            case REDELIVER -> {
+                logger.error("failureAction=REDELIVER has no terminal action for message " + message.id()
+                        + " on queue '" + this.queue + "', which " + reason
+                        + "; archiving it instead. Configure a dead-letter queue to retain failure details.");
+                this.pgmq.archive(this.queue, message.id());
+            }
         }
     }
 
@@ -1081,7 +1274,7 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
         if (this.options.getAcknowledgeMode() == AcknowledgeMode.MANUAL) {
             return;
         }
-        List<Long> ids = batch.stream().map(PgmqMessage::id).toList();
+        List<Long> ids = ids(batch);
         ids.forEach(lease::settle);
         switch (this.options.getAcknowledgeMode()) {
             case DELETE -> this.pgmq.delete(this.queue, ids);
@@ -1101,10 +1294,8 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
      */
     private void applyFailureAction(PgmqMessage<?> message, Throwable error, Lease lease) {
         lease.settle(message.id());
-        boolean nonRetryable = this.options.isNonRetryable(error);
-        boolean exhausted = nonRetryable || message.readCount() >= this.options.getMaxAttempts();
         try {
-            if (!exhausted) {
+            if (!isExhausted(message, error)) {
                 Duration delay = this.options.retryDelayAfter(message.readCount());
                 if (this.options.getConsumeMode() == ConsumeMode.TRANSACTIONAL_POP) {
                     // The rollback left the message uncounted and visible at once, even with no delay.
@@ -1119,27 +1310,7 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
                 // Otherwise leave it untouched: the existing visibility timeout redelivers it.
                 return;
             }
-            Throwable cause = rootCause(error);
-            String reason = (nonRetryable ? "not retryable after " : "exhausted maxAttempts="
-                    + this.options.getMaxAttempts() + " after ")
-                    + cause.getClass().getSimpleName()
-                    + (cause.getMessage() != null ? ": " + cause.getMessage() : "");
-            switch (this.options.getFailureAction()) {
-                case DEAD_LETTER -> deadLetter(message, reason, error);
-                case ARCHIVE -> {
-                    logger.error("Archiving message " + message.id() + " from queue '" + this.queue + "': "
-                            + reason);
-                    this.pgmq.archive(this.queue, message.id());
-                }
-                case REDELIVER -> {
-                    // REDELIVER names no terminal state, so an always-failing message would loop
-                    // forever. Archiving stops the loop without discarding the payload.
-                    logger.error("failureAction=REDELIVER has no terminal action for message " + message.id()
-                            + " on queue '" + this.queue + "' which " + reason
-                            + "; archiving it instead. Configure a dead-letter queue to retain failure details.");
-                    this.pgmq.archive(this.queue, message.id());
-                }
-            }
+            applyTerminalAction(message, failureReason(message, error), error);
         }
         catch (Throwable ex) {
             // Applying the failure action itself failed. Touch nothing: redelivery is the fallback.
@@ -1148,7 +1319,23 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
         }
     }
 
-    private void deadLetter(PgmqMessage<?> message, String reason, @Nullable Throwable error) {
+    private void moveToDeadLetterQueue(PgmqMessage<?> message, String reason, @Nullable Throwable error) {
+        sendToDeadLetterQueue(message, reason, error);
+        reportDeadLettered(message, reason);
+    }
+
+    private void reportDeadLettered(PgmqMessage<?> message, String reason) {
+        String deadLetterQueue = this.options.getDeadLetterQueue();
+        safely(() -> this.listener.onDeadLettered(this.queue, message, String.valueOf(deadLetterQueue), reason));
+        logger.error("Dead-lettered message " + message.id() + " from queue '" + this.queue + "' to '"
+                + deadLetterQueue + "': " + reason);
+    }
+
+    /**
+     * Sends a copy with failure headers to the dead-letter queue and deletes the original, in one
+     * transaction when a transaction manager is available - joining the caller's, if there is one.
+     */
+    private void sendToDeadLetterQueue(PgmqMessage<?> message, String reason, @Nullable Throwable error) {
         String deadLetterQueue = this.options.getDeadLetterQueue();
         if (deadLetterQueue == null) {
             throw new IllegalStateException("no dead-letter queue configured for queue '" + this.queue + "'");
@@ -1175,7 +1362,7 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
             this.pgmq.sendRaw(deadLetterQueue, message.rawPayload(), SendOptions.headers(headers));
             this.pgmq.delete(this.queue, message.id());
         };
-        TransactionTemplate template = this.transactionTemplate;
+        TransactionTemplate template = this.deadLetterTransactionTemplate;
         if (template != null) {
             // Atomic: the message is never both dead-lettered and left behind.
             template.executeWithoutResult((status) -> move.run());
@@ -1183,9 +1370,6 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
         else {
             move.run();
         }
-        safely(() -> this.listener.onDeadLettered(this.queue, message, deadLetterQueue, reason));
-        logger.error("Dead-lettered message " + message.id() + " from queue '" + this.queue + "' to '"
-                + deadLetterQueue + "': " + reason);
     }
 
     // ---------------------------------------------------------------------
@@ -1199,10 +1383,16 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
         }
         Duration visibility = this.options.getVisibilityTimeout();
         // Refresh at a third of the lease so two refreshes can be missed before it lapses.
-        long periodMillis = Math.max(200, visibility.toMillis() / 3);
-        Lease lease = new Lease(batch.stream().map(PgmqMessage::id).toList(), true);
-        lease.task = scheduler.scheduleAtFixedRate(() -> lease.refresh(this.pgmq, this.queue, visibility),
-                periodMillis, periodMillis, TimeUnit.MILLISECONDS);
+        long periodMillis = Math.max(MIN_LEASE_REFRESH_MILLIS, visibility.toMillis() / 3);
+        Lease lease = new Lease(ids(batch), true);
+        try {
+            lease.task = scheduler.scheduleAtFixedRate(() -> lease.refresh(this.pgmq, this.queue, visibility),
+                    periodMillis, periodMillis, TimeUnit.MILLISECONDS);
+        }
+        catch (RejectedExecutionException ex) {
+            // Stopping: the dispatch hands back what it does not start, so no refresh is needed.
+            return Lease.NONE;
+        }
         return lease;
     }
 
@@ -1228,37 +1418,67 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
         }
         // PGMQ rounds the delay up to whole seconds.
         long seconds = Math.max(0, delay.getSeconds() + (delay.getNano() > 0 ? 1 : 0));
+        // One wake-up per second covers every retry falling due in it, however many fail; it fires
+        // once that second has ended, after the last of them.
+        long dueSecond = TimeUnit.NANOSECONDS.toSeconds(System.nanoTime()) + seconds;
+        if (!this.scheduledWakeUps.add(dueSecond)) {
+            return;
+        }
         try {
-            scheduler.schedule(this.wakeUp::signal, seconds, TimeUnit.SECONDS);
+            scheduler.schedule(() -> {
+                this.scheduledWakeUps.remove(dueSecond);
+                this.wakeUp.signal();
+            }, seconds + 1, TimeUnit.SECONDS);
         }
         catch (RejectedExecutionException ex) {
             // Stopping: nothing is left to wake.
+            this.scheduledWakeUps.remove(dueSecond);
         }
     }
 
-    private TransactionTemplate requireTransactionTemplate() {
+    private TransactionTemplate requireHandlerTransactionTemplate() {
         TransactionTemplate template = this.handlerTransactionTemplate;
         Assert.state(template != null, "transactional processing requires a PlatformTransactionManager");
         return template;
     }
 
+    /** Runs {@code action} with the queue, message id and read count in the MDC. */
     private void withMdc(PgmqMessage<?> message, Runnable action) {
-        // Every log line emitted by the handler carries enough context to debug a failure:
-        // which queue, which message, and how many times it has been tried.
-        String previousQueue = MdcSupport.get(MDC_QUEUE);
         String previousId = MdcSupport.get(MDC_MESSAGE_ID);
         String previousReadCount = MdcSupport.get(MDC_READ_COUNT);
-        MdcSupport.put(MDC_QUEUE, this.queue);
         MdcSupport.put(MDC_MESSAGE_ID, Long.toString(message.id()));
         MdcSupport.put(MDC_READ_COUNT, Integer.toString(message.readCount()));
+        try {
+            withQueueMdc(action);
+        }
+        finally {
+            restore(MDC_MESSAGE_ID, previousId);
+            restore(MDC_READ_COUNT, previousReadCount);
+        }
+    }
+
+    /** Runs {@code action} with the queue in the MDC - all a batch has, lacking one message id. */
+    private void withQueueMdc(Runnable action) {
+        String previousQueue = MdcSupport.get(MDC_QUEUE);
+        MdcSupport.put(MDC_QUEUE, this.queue);
         try {
             action.run();
         }
         finally {
             restore(MDC_QUEUE, previousQueue);
-            restore(MDC_MESSAGE_ID, previousId);
-            restore(MDC_READ_COUNT, previousReadCount);
         }
+    }
+
+    private void notifySuccess(List<? extends PgmqMessage<?>> messages, Duration took) {
+        messages.forEach((message) -> safely(() -> this.listener.onSuccess(this.queue, message, took)));
+    }
+
+    private static Duration since(Instant startedAt) {
+        return Duration.between(startedAt, Instant.now());
+    }
+
+    private static List<Long> ids(List<? extends PgmqMessage<?>> messages) {
+        return messages.stream().map(PgmqMessage::id).toList();
     }
 
     private static void restore(String key, @Nullable String previous) {
@@ -1348,6 +1568,9 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
 
         private volatile @Nullable ScheduledFuture<?> task;
 
+        /** Guarded by {@link #lock}. */
+        private int failedRefreshes;
+
         private Lease(List<Long> ids, boolean active) {
             this.pending = new LinkedHashSet<>(ids);
             this.active = active;
@@ -1375,12 +1598,23 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
                 pgmq.setVisibilityTimeout(queue, List.copyOf(this.pending), visibility);
             }
             catch (Throwable ex) {
-                logger.warn("Could not extend the lease of " + this.pending.size() + " message(s) on queue '" + queue
-                        + "'; they may be redelivered while still being processed", ex);
+                // Refreshes run every third of the visibility timeout, so an outage would otherwise
+                // log a stack trace several times a lease; the first one is enough.
+                this.failedRefreshes++;
+                String message = "Could not extend the lease of " + this.pending.size() + " message(s) on queue '"
+                        + queue + "'; they may be redelivered while still being processed";
+                if (this.failedRefreshes == 1) {
+                    logger.warn(message, ex);
+                }
+                else {
+                    logger.debug(message + " (" + this.failedRefreshes + " consecutive failures, latest: " + ex + ")");
+                }
+                return;
             }
             finally {
                 this.lock.unlock();
             }
+            this.failedRefreshes = 0;
         }
 
         @Override
@@ -1464,8 +1698,9 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
 
         private final List<PgmqMessage<T>> deliverable = new ArrayList<>();
 
-        /** Messages that cannot be handed to the handler, with the conversion error or {@code null} if poison. */
-        private final Map<PgmqMessage<String>, @Nullable Throwable> undeliverable = new LinkedHashMap<>();
+        private final List<Undeliverable> undeliverable = new ArrayList<>();
+
+        private boolean deadLetteredInTransaction;
 
         /** When the handler was invoked; {@code null} until then. */
         private @Nullable Instant startedAt;
@@ -1515,7 +1750,7 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
 
         @Override
         public void deadLetter(String reason) {
-            settle(() -> PgmqMessageListenerContainer.this.deadLetter(this.message, reason, null));
+            settle(() -> moveToDeadLetterQueue(this.message, reason, null));
         }
 
         @Override

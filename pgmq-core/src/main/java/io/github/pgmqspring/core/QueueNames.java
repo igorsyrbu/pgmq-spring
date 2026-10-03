@@ -18,6 +18,7 @@
 
 package io.github.pgmqspring.core;
 
+import java.util.Locale;
 import java.util.regex.Pattern;
 
 /**
@@ -83,6 +84,6 @@ public final class QueueNames {
      * <p>Two names with the same normalized form address the same queue.
      */
     public static String normalize(String queueName) {
-        return queueName.toLowerCase(java.util.Locale.ROOT);
+        return queueName.toLowerCase(Locale.ROOT);
     }
 }

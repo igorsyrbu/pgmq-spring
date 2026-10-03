@@ -41,6 +41,8 @@ dependencies {
     testFixturesApi 'org.testcontainers:testcontainers-postgresql'
     testFixturesApi 'com.zaxxer:HikariCP'
     testFixturesApi 'org.springframework:spring-jdbc'
+    testFixturesImplementation 'tools.jackson.core:jackson-databind'
+    testFixturesImplementation 'org.junit.jupiter:junit-jupiter-api'
 }
 
 // The test fixtures are this build's own Testcontainers bootstrap, shared by the other modules'

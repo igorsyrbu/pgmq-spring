@@ -31,6 +31,7 @@ import io.github.pgmqspring.core.QueueKind;
 import io.github.pgmqspring.core.client.GroupReadStrategy;
 import io.github.pgmqspring.core.consumer.AcknowledgeMode;
 import io.github.pgmqspring.core.consumer.ConsumeMode;
+import io.github.pgmqspring.core.consumer.ConsumerOptions;
 import io.github.pgmqspring.core.consumer.FailureAction;
 import io.github.pgmqspring.core.consumer.WakeUp;
 
@@ -75,7 +76,8 @@ public class PgmqProperties {
 
     /**
      * Listener containers to create, by name. Each inherits pgmq.consumer.* and overrides what it
-     * sets, and becomes a bean named pgmqConsumer-{name}.
+     * sets, and becomes a bean named pgmqConsumer-{name}. Entries are read straight from the
+     * Environment when the application context starts; this property exists for IDE completion.
      */
     private Map<String, DeclaredConsumer> consumers = new LinkedHashMap<>();
 
@@ -188,8 +190,9 @@ public class PgmqProperties {
 
         /**
          * With notify-on-insert, send at most one notification per this interval. PGMQ drops the
-         * notifications of inserts within it rather than delaying them. Unset uses PGMQ's default
-         * of 250ms; zero disables throttling.
+         * notifications of inserts within it rather than delaying them. Unset keeps the queue's
+         * current throttle, or PGMQ's default of 250ms when notifications are being enabled; zero
+         * disables throttling.
          */
         private @Nullable Duration notifyThrottle;
 
@@ -655,6 +658,36 @@ public class PgmqProperties {
 
         public void setShutdownTimeout(Duration shutdownTimeout) {
             this.shutdownTimeout = shutdownTimeout;
+        }
+
+        ConsumerOptions toOptions() {
+            return ConsumerOptions.builder()
+                    .concurrency(this.concurrency)
+                    .batchSize(this.batchSize)
+                    .visibilityTimeout(this.visibilityTimeout)
+                    .pollDelay(this.pollDelay)
+                    .maxPollDelay(this.maxPollDelay)
+                    .pollJitter(this.pollJitter)
+                    .longPoll(this.longPoll)
+                    .wakeUp(this.wakeUp)
+                    .consumeMode(this.consumeMode)
+                    .acknowledgeMode(this.acknowledgeMode)
+                    .groupOrdered(this.groupOrdered)
+                    .groupStrategy(this.groupStrategy)
+                    .failureAction(this.failureAction)
+                    .retryDelay(this.retryDelay)
+                    .retryMultiplier(this.retryMultiplier)
+                    .maxRetryDelay(this.maxRetryDelay)
+                    .maxAttempts(this.maxAttempts)
+                    .nonRetryableExceptions(this.nonRetryableExceptions)
+                    .deadLetterQueue(this.deadLetterQueue)
+                    .transactional(this.transactional)
+                    .transactionTimeout(this.transactionTimeout)
+                    .extendLease(this.extendLease)
+                    .batchAcknowledgements(this.batchAcknowledgements)
+                    .ackBatchSize(this.ackBatchSize)
+                    .shutdownTimeout(this.shutdownTimeout)
+                    .build();
         }
     }
 

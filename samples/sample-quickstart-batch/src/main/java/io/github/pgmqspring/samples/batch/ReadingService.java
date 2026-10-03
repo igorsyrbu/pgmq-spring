@@ -30,9 +30,9 @@ import io.github.pgmqspring.core.client.PgmqOperations;
  * The producing side: record an ingest request and enqueue all of its readings, atomically.
  *
  * <p>{@code sendBatch} writes every message in a single statement - one round trip however many
- * readings there are, up to {@code pgmq.producer.max-batch-size}, beyond which it uses one
- * statement per 500 - and, like {@code send}, joins the surrounding transaction. Either the
- * ingestion row and all of its messages commit, or none of them do.
+ * readings there are, up to {@code pgmq.producer.max-batch-size} (see {@code application.yaml}),
+ * beyond which it uses one statement per that many - and, like {@code send}, joins the surrounding
+ * transaction. Either the ingestion row and all of its messages commit, or none of them do.
  */
 @Service
 public class ReadingService {
@@ -59,7 +59,7 @@ public class ReadingService {
         this.jdbc.sql("insert into ingestions(id, reading_ct) values (?, ?)")
                 .params(ingestionId, readings.size())
                 .update();
-        // One statement per 500 readings. If anything after this throws, nothing was sent.
+        // One statement per pgmq.producer.max-batch-size readings. If anything after this throws, nothing was sent.
         return this.pgmq.sendBatch(QUEUE, readings);
     }
 }

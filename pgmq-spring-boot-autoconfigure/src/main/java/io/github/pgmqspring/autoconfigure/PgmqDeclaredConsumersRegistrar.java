@@ -51,11 +51,12 @@ import io.github.pgmqspring.core.consumer.PgmqMessageListenerContainer;
  * Registers a {@link PgmqMessageListenerContainer} bean, named {@code pgmqConsumer-<name>}, for
  * every entry under {@code pgmq.consumers}.
  *
- * <p>Each entry is bound in two layers - {@code pgmq.consumer.*}, then its own keys on top - so it
- * inherits every default and overrides exactly what it sets. Bean definitions are registered
- * before any bean exists, which is why the entries are bound from the {@code Environment} rather
- * than read from {@link PgmqProperties}; the containers themselves, and the checks that need other
- * beans, are created later with every other singleton.
+ * <p>Each entry's options are bound in two layers - {@code pgmq.consumer.*}, then its own keys on
+ * top - so it inherits every default and overrides exactly what it sets. Its queue, handler,
+ * payload type, transaction manager and auto-startup come from the entry alone. Bean definitions
+ * are registered before any bean exists, which is why the entries are bound from the
+ * {@code Environment} rather than read from {@link PgmqProperties}; the containers themselves, and
+ * the checks that need other beans, are created later with every other singleton.
  */
 class PgmqDeclaredConsumersRegistrar implements BeanDefinitionRegistryPostProcessor, EnvironmentAware {
 
@@ -94,26 +95,36 @@ class PgmqDeclaredConsumersRegistrar implements BeanDefinitionRegistryPostProces
                 .orElse(Map.of());
         Map<String, String> consumersByQueue = new LinkedHashMap<>();
         declared.forEach((name, consumer) -> {
-            String queue = QueueNames.validate(consumer.getQueue() != null ? consumer.getQueue() : name);
-            String previous = consumersByQueue.put(QueueNames.normalize(queue), name);
-            if (previous != null) {
-                throw new IllegalStateException(PREFIX + "." + previous + " and " + PREFIX + "." + name
-                        + " both consume queue '" + queue + "'. Declare it once, and raise its concurrency instead.");
-            }
-            if (!StringUtils.hasText(consumer.getHandler())) {
-                throw new IllegalStateException(PREFIX + "." + name + ".handler is required: the name of the "
-                        + "handler bean that consumes queue '" + queue + "'");
-            }
-            String beanName = BEAN_NAME_PREFIX + name;
-            if (registry.containsBeanDefinition(beanName)) {
-                throw new IllegalStateException("Cannot create the container for " + PREFIX + "." + name
-                        + ": a bean named '" + beanName + "' already exists");
-            }
-            RootBeanDefinition definition = new RootBeanDefinition(PgmqMessageListenerContainer.class);
+            validate(registry, consumersByQueue, name, consumer);
             ConfigurationPropertyName entryName = entryNames.get(consumer);
-            definition.setInstanceSupplier(() -> createContainer(beanFactory, binder, name, entryName, beanName));
-            registry.registerBeanDefinition(beanName, definition);
+            RootBeanDefinition definition = new RootBeanDefinition(PgmqMessageListenerContainer.class);
+            definition.setInstanceSupplier(
+                    () -> createContainer(beanFactory, binder, name, entryName, consumer, BEAN_NAME_PREFIX + name));
+            registry.registerBeanDefinition(BEAN_NAME_PREFIX + name, definition);
         });
+    }
+
+    private static void validate(BeanDefinitionRegistry registry, Map<String, String> consumersByQueue, String name,
+            PgmqProperties.DeclaredConsumer consumer) {
+        String queue = QueueNames.validate(queueOf(consumer, name));
+        String previous = consumersByQueue.put(QueueNames.normalize(queue), name);
+        if (previous != null) {
+            throw new IllegalStateException(PREFIX + "." + previous + " and " + PREFIX + "." + name
+                    + " both consume queue '" + queue + "'. Declare it once, and raise its concurrency instead.");
+        }
+        if (!StringUtils.hasText(consumer.getHandler())) {
+            throw new IllegalStateException(PREFIX + "." + name + ".handler is required: the name of the "
+                    + "handler bean that consumes queue '" + queue + "'");
+        }
+        String beanName = BEAN_NAME_PREFIX + name;
+        if (registry.containsBeanDefinition(beanName)) {
+            throw new IllegalStateException("Cannot create the container for " + PREFIX + "." + name
+                    + ": a bean named '" + beanName + "' already exists");
+        }
+    }
+
+    private static String queueOf(PgmqProperties.DeclaredConsumer consumer, String name) {
+        return StringUtils.hasText(consumer.getQueue()) ? consumer.getQueue() : name;
     }
 
     @Override
@@ -129,14 +140,15 @@ class PgmqDeclaredConsumersRegistrar implements BeanDefinitionRegistryPostProces
     }
 
     private static PgmqMessageListenerContainer<?> createContainer(ConfigurableListableBeanFactory beanFactory,
-            Binder binder, String name, @Nullable ConfigurationPropertyName entryName, String beanName) {
+            Binder binder, String name, @Nullable ConfigurationPropertyName entryName,
+            PgmqProperties.DeclaredConsumer consumer, String beanName) {
         String property = PREFIX + "." + name;
-        PgmqProperties.DeclaredConsumer consumer = new PgmqProperties.DeclaredConsumer();
-        binder.bind("pgmq.consumer", Bindable.ofInstance(consumer));
+        PgmqProperties.Consumer defaults = new PgmqProperties.Consumer();
+        binder.bind("pgmq.consumer", Bindable.ofInstance(defaults));
         if (entryName != null) {
-            binder.bind(entryName, Bindable.ofInstance(consumer));
+            binder.bind(entryName, Bindable.ofInstance(defaults));
         }
-        String queue = consumer.getQueue() != null ? consumer.getQueue() : name;
+        String queue = queueOf(consumer, name);
         String handlerName = consumer.getHandler();
         if (handlerName == null || !beanFactory.containsBean(handlerName)) {
             throw new IllegalStateException(property + ".handler names bean '" + handlerName
@@ -146,7 +158,7 @@ class PgmqDeclaredConsumersRegistrar implements BeanDefinitionRegistryPostProces
         Class<?> payloadType = payloadType(beanFactory, property, handlerName, handler, consumer.getPayloadType());
         ConsumerOptions options;
         try {
-            options = PgmqAutoConfiguration.consumerOptions(consumer);
+            options = defaults.toOptions();
         }
         catch (IllegalArgumentException ex) {
             throw new IllegalStateException(property + ": " + ex.getMessage(), ex);
@@ -232,7 +244,8 @@ class PgmqDeclaredConsumersRegistrar implements BeanDefinitionRegistryPostProces
         }
         else {
             throw new IllegalStateException(property + ".handler names a " + handler.getClass().getName()
-                    + ", which is not a PgmqMessageHandler, PgmqAcknowledgingMessageHandler or PgmqBatchMessageHandler");
+                    + ", which is not a PgmqMessageHandler, PgmqAcknowledgingMessageHandler or "
+                    + "PgmqBatchMessageHandler");
         }
         try {
             return builder.build();

@@ -29,7 +29,6 @@ import org.junit.jupiter.api.Test;
 
 import io.github.pgmqspring.core.PgmqContainerSupport;
 import io.github.pgmqspring.core.PgmqMessage;
-import io.github.pgmqspring.core.convert.JacksonPayloadConverter;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
@@ -49,14 +48,13 @@ class GroupedReadIntegrationTests {
 
     @BeforeAll
     static void setUp() {
-        pgmq = new PgmqTemplate(PgmqContainerSupport.dataSource(), new JacksonPayloadConverter());
+        pgmq = PgmqContainerSupport.template();
         Assumptions.assumeTrue(pgmq.capabilities().groupedReads(),
                 "grouped reads require PGMQ 1.10.0+; installed: " + pgmq.capabilities().version());
     }
 
-    private String newQueue(String prefix) {
-        String queue = PgmqContainerSupport.uniqueQueueName(prefix);
-        pgmq.createQueue(queue);
+    private static String newFifoQueue(String prefix) {
+        String queue = PgmqContainerSupport.newQueue(prefix);
         pgmq.createFifoIndex(queue);
         return queue;
     }
@@ -67,7 +65,7 @@ class GroupedReadIntegrationTests {
 
     @Test
     void withholdsAWholeGroupWhileOneOfItsMessagesIsInFlight() {
-        String queue = newQueue("grp_exclusive");
+        String queue = newFifoQueue("grp_exclusive");
         pgmq.send(queue, Map.of("n", 1), SendOptions.none().group("user-42"));
         pgmq.send(queue, Map.of("n", 2), SendOptions.none().group("user-42"));
         pgmq.send(queue, Map.of("n", 3), SendOptions.none().group("user-42"));
@@ -126,7 +124,7 @@ class GroupedReadIntegrationTests {
     @Test
     void longPollingWorksForEveryStrategy() {
         for (GroupReadStrategy strategy : GroupReadStrategy.values()) {
-            String queue = newQueue("grp_poll");
+            String queue = newFifoQueue("grp_poll");
             pgmq.send(queue, "waiting", SendOptions.none().group("g"));
 
             List<PgmqMessage<String>> read = pgmq.readGrouped(queue, ReadOptions.batch(1)
@@ -139,7 +137,7 @@ class GroupedReadIntegrationTests {
 
     @Test
     void longPollingReturnsEmptyWhenTheWindowExpires() {
-        String queue = newQueue("grp_poll_empty");
+        String queue = newFifoQueue("grp_poll_empty");
 
         long startedAt = System.nanoTime();
         List<PgmqMessage<String>> read = pgmq.readGrouped(
@@ -152,7 +150,7 @@ class GroupedReadIntegrationTests {
 
     @Test
     void differentGroupsDoNotBlockEachOther() {
-        String queue = newQueue("grp_independent");
+        String queue = newFifoQueue("grp_independent");
         pgmq.send(queue, "a", SendOptions.none().group("user-a"));
         pgmq.send(queue, "b", SendOptions.none().group("user-b"));
 
@@ -163,7 +161,7 @@ class GroupedReadIntegrationTests {
 
     @Test
     void messagesSentWithoutAGroupShareTheImplicitDefaultGroup() {
-        String queue = newQueue("grp_default");
+        String queue = newFifoQueue("grp_default");
         pgmq.send(queue, "first");
         pgmq.send(queue, "second");
 
@@ -179,7 +177,7 @@ class GroupedReadIntegrationTests {
 
     @Test
     void groupOrderIsPreservedAcrossTheWholeQueue() {
-        String queue = newQueue("grp_order");
+        String queue = newFifoQueue("grp_order");
         for (int i = 0; i < 8; i++) {
             pgmq.send(queue, Map.of("seq", i), SendOptions.none().group("ordered"));
         }
@@ -193,7 +191,7 @@ class GroupedReadIntegrationTests {
 
     @Test
     void conditionalFilterIsRejectedBecausePgmqHasNoSuchOverload() {
-        String queue = newQueue("grp_conditional");
+        String queue = newFifoQueue("grp_conditional");
 
         assertThatExceptionOfType(IllegalArgumentException.class)
                 .isThrownBy(() -> pgmq.readGrouped(
@@ -203,7 +201,7 @@ class GroupedReadIntegrationTests {
 
     @Test
     void groupHelpersUseTheExactHeaderPgmqReads() {
-        String queue = newQueue("grp_header");
+        String queue = newFifoQueue("grp_header");
         pgmq.send(queue, "payload", SendOptions.none().group("checked"));
 
         PgmqMessage<String> message = pgmq.read(queue, ReadOptions.defaults()).get(0);
@@ -214,7 +212,7 @@ class GroupedReadIntegrationTests {
 
     @Test
     void setVisibleAtDefersAMessageToAnAbsoluteInstant() {
-        String queue = newQueue("grp_visible_at");
+        String queue = newFifoQueue("grp_visible_at");
         long id = pgmq.send(queue, "deferred");
         pgmq.read(queue, ReadOptions.defaults());
 
@@ -226,7 +224,7 @@ class GroupedReadIntegrationTests {
 
     @Test
     void setVisibleAtInThePastMakesAMessageImmediatelyAvailable() {
-        String queue = newQueue("grp_visible_now");
+        String queue = newFifoQueue("grp_visible_now");
         long id = pgmq.send(queue, "revived");
         pgmq.read(queue, ReadOptions.defaults().visibilityTimeout(Duration.ofMinutes(10)));
         assertThat(pgmq.read(queue, ReadOptions.batch(10))).isEmpty();
@@ -238,7 +236,7 @@ class GroupedReadIntegrationTests {
 
     @Test
     void setVisibleAtAcceptsABatch() {
-        String queue = newQueue("grp_visible_batch");
+        String queue = newFifoQueue("grp_visible_batch");
         List<Long> ids = pgmq.sendBatch(queue, List.of("a", "b", "c"));
         pgmq.read(queue, ReadOptions.batch(10));
 
@@ -251,7 +249,7 @@ class GroupedReadIntegrationTests {
     }
 
     private String seedTwoGroups(String prefix) {
-        String queue = newQueue(prefix);
+        String queue = newFifoQueue(prefix);
         for (int n = 1; n <= 3; n++) {
             pgmq.send(queue, Map.of("n", n), SendOptions.none().group("A"));
         }

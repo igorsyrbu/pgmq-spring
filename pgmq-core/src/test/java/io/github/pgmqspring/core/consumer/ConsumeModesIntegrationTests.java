@@ -18,34 +18,31 @@
 
 package io.github.pgmqspring.core.consumer;
 
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Proxy;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import javax.sql.DataSource;
-
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.PlatformTransactionManager;
 
+import io.github.pgmqspring.core.ListenerContainers;
 import io.github.pgmqspring.core.PgmqContainerSupport;
 import io.github.pgmqspring.core.PgmqMessage;
-import io.github.pgmqspring.core.client.PgmqOperations;
+import io.github.pgmqspring.core.RecordingOperations;
 import io.github.pgmqspring.core.client.PgmqTemplate;
 import io.github.pgmqspring.core.client.ReadOptions;
 import io.github.pgmqspring.core.client.SendOptions;
-import io.github.pgmqspring.core.convert.JacksonPayloadConverter;
 
+import static io.github.pgmqspring.core.PgmqContainerSupport.countRows;
+import static io.github.pgmqspring.core.PgmqContainerSupport.newQueue;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 import static org.awaitility.Awaitility.await;
@@ -62,39 +59,20 @@ class ConsumeModesIntegrationTests {
 
     private static JdbcTemplate jdbc;
 
-    private final ConcurrentLinkedQueue<PgmqMessageListenerContainer<?>> containers = new ConcurrentLinkedQueue<>();
+    @RegisterExtension
+    final ListenerContainers containers = new ListenerContainers();
 
     @BeforeAll
     static void setUp() {
-        DataSource dataSource = PgmqContainerSupport.dataSource();
-        pgmq = new PgmqTemplate(dataSource, new JacksonPayloadConverter());
-        transactionManager = new DataSourceTransactionManager(dataSource);
-        jdbc = new JdbcTemplate(dataSource);
-    }
-
-    @AfterEach
-    void stopContainers() {
-        PgmqMessageListenerContainer<?> container;
-        while ((container = this.containers.poll()) != null) {
-            container.stop();
-        }
-    }
-
-    private static String newQueue(String prefix) {
-        String queue = PgmqContainerSupport.uniqueQueueName(prefix);
-        pgmq.createQueue(queue);
-        return queue;
+        pgmq = PgmqContainerSupport.template();
+        transactionManager = new DataSourceTransactionManager(PgmqContainerSupport.dataSource());
+        jdbc = PgmqContainerSupport.jdbc();
     }
 
     private static String newTable(String queue) {
         String table = "public." + queue + "_writes";
         jdbc.execute("create table " + table + " (order_id text not null, attempt int not null)");
         return table;
-    }
-
-    private static int count(String table) {
-        Integer n = jdbc.queryForObject("select count(*) from " + table, Integer.class);
-        return n != null ? n : 0;
     }
 
     private static ConsumerOptions.Builder transactionalPop() {
@@ -106,30 +84,14 @@ class ConsumeModesIntegrationTests {
                 .maxPollDelay(Duration.ofMillis(100));
     }
 
-    private <T> PgmqMessageListenerContainer<T> start(PgmqMessageListenerContainer<T> container) {
-        this.containers.add(container);
-        container.start();
-        return container;
-    }
-
     @Test
     void aCommittedHandlerRemovesTheMessageWithOnePopAndNothingElse() {
         String queue = newQueue("txpop_commit");
         String table = newTable(queue);
-        List<String> calls = new CopyOnWriteArrayList<>();
-        PgmqOperations recording = (PgmqOperations) Proxy.newProxyInstance(getClass().getClassLoader(),
-                new Class<?>[] {PgmqOperations.class}, (proxy, method, args) -> {
-                    calls.add(method.getName());
-                    try {
-                        return method.invoke(pgmq, args);
-                    }
-                    catch (InvocationTargetException ex) {
-                        throw ex.getCause();
-                    }
-                });
+        RecordingOperations recording = new RecordingOperations(pgmq);
         ConcurrentLinkedQueue<Integer> readCounts = new ConcurrentLinkedQueue<>();
 
-        start(PgmqMessageListenerContainer.builder(recording, queue, Order.class)
+        this.containers.start(PgmqMessageListenerContainer.builder(recording.proxy(), queue, Order.class)
                 .options(transactionalPop().build())
                 .transactionManager(transactionManager)
                 .handler((message) -> {
@@ -139,13 +101,13 @@ class ConsumeModesIntegrationTests {
                 .build());
         pgmq.sendBatch(queue, List.of(new Order("a", 1), new Order("b", 2), new Order("c", 3)));
 
-        await().atMost(Duration.ofSeconds(20)).until(() -> count(table) == 3);
+        await().atMost(Duration.ofSeconds(20)).until(() -> countRows(table) == 3);
         assertThat(pgmq.metrics(queue).queueLength()).isZero();
         assertThat(readCounts).containsOnly(1);
         // One pop per message: no read updating it first, no delete afterwards.
-        assertThat(calls).doesNotContain("read", "delete", "archive", "setVisibilityTimeout")
+        assertThat(recording.calls()).doesNotContain("read", "delete", "archive", "setVisibilityTimeout")
                 .filteredOn("pop"::equals).hasSizeGreaterThanOrEqualTo(3);
-        assertThat(count("pgmq.a_" + queue)).isZero();
+        assertThat(countRows("pgmq.a_" + queue)).isZero();
     }
 
     @Test
@@ -155,7 +117,7 @@ class ConsumeModesIntegrationTests {
         CountDownLatch failed = new CountDownLatch(1);
         ConcurrentLinkedQueue<Integer> readCounts = new ConcurrentLinkedQueue<>();
 
-        start(PgmqMessageListenerContainer.builder(pgmq, queue, Order.class)
+        this.containers.start(PgmqMessageListenerContainer.builder(pgmq, queue, Order.class)
                 .options(transactionalPop().retryDelay(Duration.ofSeconds(3)).build())
                 .transactionManager(transactionManager)
                 .handler((message) -> {
@@ -186,7 +148,7 @@ class ConsumeModesIntegrationTests {
         String dlq = newQueue("txpop_exhausted_dlq");
         AtomicInteger invocations = new AtomicInteger();
 
-        start(PgmqMessageListenerContainer.builder(pgmq, queue, Order.class)
+        this.containers.start(PgmqMessageListenerContainer.builder(pgmq, queue, Order.class)
                 .options(transactionalPop()
                         .retryDelay(Duration.ZERO)
                         .maxAttempts(3)
@@ -216,7 +178,7 @@ class ConsumeModesIntegrationTests {
 
         pgmq.sendRaw(queue, "\"not an order\"", SendOptions.none());
         pgmq.sendBatch(queue, List.of(new Order("a", 1), new Order("b", 2)));
-        start(PgmqMessageListenerContainer.builder(pgmq, queue, Order.class)
+        this.containers.start(PgmqMessageListenerContainer.builder(pgmq, queue, Order.class)
                 .options(transactionalPop()
                         .batchSize(10)
                         .retryDelay(Duration.ZERO)
@@ -242,7 +204,7 @@ class ConsumeModesIntegrationTests {
         pgmq.sendBatch(queue, List.of(new Order("a", 1), new Order("b", 2), new Order("c", 3), new Order("d", 4)));
         ConcurrentLinkedQueue<Integer> batchSizes = new ConcurrentLinkedQueue<>();
 
-        start(PgmqMessageListenerContainer.builder(pgmq, queue, Order.class)
+        this.containers.start(PgmqMessageListenerContainer.builder(pgmq, queue, Order.class)
                 .options(transactionalPop().batchSize(10).build())
                 .transactionManager(transactionManager)
                 .batchHandler((batch) -> batchSizes.add(batch.size()))
@@ -259,7 +221,7 @@ class ConsumeModesIntegrationTests {
         CountDownLatch release = new CountDownLatch(1);
         ConcurrentLinkedQueue<Integer> secondConsumer = new ConcurrentLinkedQueue<>();
         try {
-            start(PgmqMessageListenerContainer.builder(pgmq, queue, Order.class)
+            this.containers.start(PgmqMessageListenerContainer.builder(pgmq, queue, Order.class)
                     .options(transactionalPop().build())
                     .transactionManager(transactionManager)
                     .handler((message) -> {
@@ -269,7 +231,7 @@ class ConsumeModesIntegrationTests {
                     .build());
             pgmq.send(queue, new Order("a", 1));
             assertThat(popped.await(10, TimeUnit.SECONDS)).isTrue();
-            start(PgmqMessageListenerContainer.builder(pgmq, queue, Order.class)
+            this.containers.start(PgmqMessageListenerContainer.builder(pgmq, queue, Order.class)
                     .options(transactionalPop().build())
                     .transactionManager(transactionManager)
                     .handler((message) -> secondConsumer.add(message.readCount()))
@@ -294,7 +256,7 @@ class ConsumeModesIntegrationTests {
         String queue = newQueue("pop_at_most_once");
         AtomicInteger invocations = new AtomicInteger();
 
-        start(PgmqMessageListenerContainer.builder(pgmq, queue, Order.class)
+        this.containers.start(PgmqMessageListenerContainer.builder(pgmq, queue, Order.class)
                 .options(ConsumerOptions.builder()
                         .consumeMode(ConsumeMode.POP)
                         .pollDelay(Duration.ofMillis(50))
@@ -310,7 +272,7 @@ class ConsumeModesIntegrationTests {
         await().atMost(Duration.ofSeconds(10)).until(() -> invocations.get() == 1);
         await().during(Duration.ofSeconds(2)).atMost(Duration.ofSeconds(5)).until(() -> invocations.get() == 1);
         assertThat(pgmq.metrics(queue).queueLength()).isZero();
-        assertThat(count("pgmq.a_" + queue)).isZero();
+        assertThat(countRows("pgmq.a_" + queue)).isZero();
     }
 
     @Test
@@ -319,7 +281,7 @@ class ConsumeModesIntegrationTests {
         pgmq.sendBatch(queue, List.of(Map.of("n", 1), Map.of("n", 2), Map.of("n", 3)));
         ConcurrentLinkedQueue<Long> handled = new ConcurrentLinkedQueue<>();
 
-        start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
+        this.containers.start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
                 .options(ConsumerOptions.builder()
                         .consumeMode(ConsumeMode.POP)
                         .batchSize(10)

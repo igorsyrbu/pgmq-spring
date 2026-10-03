@@ -18,6 +18,8 @@
 
 package io.github.pgmqspring.core;
 
+import org.jspecify.annotations.Nullable;
+
 /**
  * Thrown when an operation targets a queue that does not exist.
  */
@@ -27,7 +29,7 @@ public class QueueNotFoundException extends PgmqException {
 
     private final String queueName;
 
-    public QueueNotFoundException(String queueName, Throwable cause) {
+    public QueueNotFoundException(String queueName, @Nullable Throwable cause) {
         super("PGMQ queue '" + queueName + "' does not exist", cause);
         this.queueName = queueName;
     }

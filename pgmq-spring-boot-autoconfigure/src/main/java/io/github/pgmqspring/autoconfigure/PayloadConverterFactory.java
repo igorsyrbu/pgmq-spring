@@ -18,9 +18,12 @@
 
 package io.github.pgmqspring.autoconfigure;
 
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.jspecify.annotations.Nullable;
-import org.springframework.beans.BeansException;
 import org.springframework.beans.factory.BeanFactory;
+import org.springframework.beans.factory.NoSuchBeanDefinitionException;
+import org.springframework.beans.factory.NoUniqueBeanDefinitionException;
 import org.springframework.util.ClassUtils;
 
 import io.github.pgmqspring.core.convert.Jackson2PayloadConverter;
@@ -46,6 +49,8 @@ import io.github.pgmqspring.core.convert.PayloadConverter;
  * date format and registered modules as the rest of the application's JSON.
  */
 final class PayloadConverterFactory {
+
+    private static final Log logger = LogFactory.getLog(PayloadConverterFactory.class);
 
     private static final String JACKSON3_MAPPER = "tools.jackson.databind.ObjectMapper";
 
@@ -83,20 +88,33 @@ final class PayloadConverterFactory {
     }
 
     private static @Nullable PayloadConverter jackson3FromBean(BeanFactory beanFactory) {
-        try {
-            return new JacksonPayloadConverter(beanFactory.getBean(tools.jackson.databind.ObjectMapper.class));
-        }
-        catch (BeansException ex) {
-            return null;
-        }
+        tools.jackson.databind.ObjectMapper mapper = mapperBean(beanFactory,
+                tools.jackson.databind.ObjectMapper.class, "a Jackson 2 mapper bean or a default");
+        return mapper != null ? new JacksonPayloadConverter(mapper) : null;
     }
 
     private static @Nullable PayloadConverter jackson2FromBean(BeanFactory beanFactory) {
+        com.fasterxml.jackson.databind.ObjectMapper mapper =
+                mapperBean(beanFactory, com.fasterxml.jackson.databind.ObjectMapper.class, "a default");
+        return mapper != null ? new Jackson2PayloadConverter(mapper) : null;
+    }
+
+    /**
+     * The application's mapper bean, or {@code null} when it has none. An ambiguous choice also
+     * yields {@code null}, with a warning, rather than failing startup; a mapper that cannot be
+     * created fails it.
+     */
+    private static <T> @Nullable T mapperBean(BeanFactory beanFactory, Class<T> type, String fallback) {
         try {
-            return new Jackson2PayloadConverter(
-                    beanFactory.getBean(com.fasterxml.jackson.databind.ObjectMapper.class));
+            return beanFactory.getBean(type);
         }
-        catch (BeansException ex) {
+        catch (NoUniqueBeanDefinitionException ex) {
+            logger.warn("Several " + type.getName() + " beans and none is primary, so none is used for PGMQ "
+                    + "payloads; falling back to " + fallback + " mapper. Mark one @Primary, or define a "
+                    + "PayloadConverter bean.");
+            return null;
+        }
+        catch (NoSuchBeanDefinitionException ex) {
             return null;
         }
     }

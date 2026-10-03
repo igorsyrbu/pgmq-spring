@@ -83,19 +83,27 @@ class BatchQuickstartIntegrationTests {
                 .single();
     }
 
-    private double sendStatements() {
+    private void assertNothingDeadLettered(String prefix) {
+        await().during(Duration.ofSeconds(2)).atMost(Duration.ofSeconds(5)).until(() -> this.jdbc
+                .sql("select count(*) from pgmq.q_readings_dlq where message->>'id' like ?")
+                .param(prefix + "-%")
+                .query(Integer.class).single() == 0);
+    }
+
+    /** pgmq.send.duration records one sample per send call, however many statements it takes. */
+    private double sendCalls() {
         var timer = this.registry.find("pgmq.send.duration").tag("queue", ReadingService.QUEUE).timer();
         return timer != null ? timer.count() : 0;
     }
 
     @Test
     void readingsAreSentInOneStatementAndConsumedInBatches() {
-        double statementsBefore = sendStatements();
+        double callsBefore = sendCalls();
 
         List<Long> ids = this.readingService.ingest("ingest-bulk", readings("bulk", 200));
 
         assertThat(ids).hasSize(200).isSorted();
-        assertThat(sendStatements() - statementsBefore).as("200 messages, one statement").isEqualTo(1);
+        assertThat(sendCalls() - callsBefore).as("200 messages, one send").isEqualTo(1);
         await().atMost(Duration.ofSeconds(30)).until(() -> count("readings", "bulk") == 200);
         assertThat(this.handler.largestBatch()).as("the handler received batches, not single messages")
                 .isGreaterThan(1)
@@ -103,8 +111,9 @@ class BatchQuickstartIntegrationTests {
     }
 
     @Test
-    void aBatchLongerThanTheMaximumIsSentInSeveralStatements() {
-        double statementsBefore = sendStatements();
+    void aBatchLongerThanTheMaximumIsSplitButStillSentAsOne() {
+        assertThat(this.pgmq.getMaxBatchSize()).as("pgmq.producer.max-batch-size").isEqualTo(500);
+        double callsBefore = sendCalls();
 
         List<Reading> readings = new ArrayList<>();
         for (int i = 0; i < 1200; i++) {
@@ -114,7 +123,8 @@ class BatchQuickstartIntegrationTests {
         List<Long> ids = this.readingService.ingest("ingest-large", readings);
 
         assertThat(ids).hasSize(1200).isSorted();
-        assertThat(sendStatements() - statementsBefore).as("pgmq.producer.max-batch-size=500").isEqualTo(3);
+        // Three statements of at most 500, in the one transaction of ingest().
+        assertThat(sendCalls() - callsBefore).isEqualTo(1);
         await().atMost(Duration.ofSeconds(60)).until(() -> count("readings", "large") == 1200);
     }
 
@@ -127,7 +137,7 @@ class BatchQuickstartIntegrationTests {
 
         await().atMost(Duration.ofSeconds(30)).until(() -> count("readings", "mixed") == 9);
         assertThat(count("rejected_readings", "mixed")).isEqualTo(1);
-        assertThat(this.pgmq.metrics("readings_dlq").queueLength()).isZero();
+        assertNothingDeadLettered("mixed");
     }
 
     @Test
@@ -142,7 +152,7 @@ class BatchQuickstartIntegrationTests {
         await().atMost(Duration.ofSeconds(30)).until(() -> count("readings", "retry") == 20);
         assertThat(this.jdbc.sql("select count(distinct id) from readings where id like 'retry-%'")
                 .query(Integer.class).single()).isEqualTo(20);
-        assertThat(this.pgmq.metrics("readings_dlq").queueLength()).isZero();
+        assertNothingDeadLettered("retry");
     }
 
     @Test

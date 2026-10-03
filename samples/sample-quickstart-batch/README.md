@@ -73,9 +73,9 @@ pgmq.sendMessages(ReadingService.QUEUE, readings.stream()
 ```
 
 Five integration tests against a real PGMQ container: 200 readings sent in one statement and
-consumed in batches; 1,200 readings sent in three statements of at most 500; an invalid reading rejected without failing its batch; a transient failure
-retrying the whole batch while storing every reading once; and a rollback after the send
-discarding the whole batch.
+consumed in batches; 1,200 readings sent in three statements of at most 500; an invalid reading
+rejected without failing its batch; a transient failure retrying the whole batch while storing
+every reading once; and a rollback after the send discarding the whole batch.
 
 ## Next
 

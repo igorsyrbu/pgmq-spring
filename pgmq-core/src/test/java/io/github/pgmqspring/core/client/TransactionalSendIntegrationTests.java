@@ -39,6 +39,7 @@ import io.github.pgmqspring.core.PgmqContainerSupport;
 import io.github.pgmqspring.core.PgmqMessage;
 import io.github.pgmqspring.core.convert.JacksonPayloadConverter;
 
+import static io.github.pgmqspring.core.PgmqContainerSupport.newQueue;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatRuntimeException;
 
@@ -61,16 +62,10 @@ class TransactionalSendIntegrationTests {
     @BeforeAll
     static void setUp() {
         dataSource = PgmqContainerSupport.dataSource();
-        pgmq = new PgmqTemplate(dataSource, new JacksonPayloadConverter());
-        jdbc = new JdbcTemplate(dataSource);
+        pgmq = PgmqContainerSupport.template();
+        jdbc = PgmqContainerSupport.jdbc();
         transactionTemplate = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
         jdbc.execute("create table if not exists outbox_demo (id text primary key, note text)");
-    }
-
-    private String newQueue(String prefix) {
-        String queue = PgmqContainerSupport.uniqueQueueName(prefix);
-        pgmq.createQueue(queue);
-        return queue;
     }
 
     @Test

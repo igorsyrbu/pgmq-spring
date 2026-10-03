@@ -190,17 +190,17 @@ public interface PgmqOperations {
      */
     long sendRaw(String queue, String json, SendOptions options);
 
-    /** Sends several payloads in one statement, returning their ids in order. */
+    /** Sends several payloads as one batch, returning their ids in order. */
     List<Long> sendBatch(String queue, List<?> payloads);
 
-    /** Sends several payloads in one statement with shared options. */
+    /** Sends several payloads as one batch with shared options. */
     List<Long> sendBatch(String queue, List<?> payloads, SendOptions options);
 
-    /** Sends several already-serialized JSON documents in one statement. */
+    /** Sends several already-serialized JSON documents as one batch. */
     List<Long> sendRawBatch(String queue, List<String> jsonPayloads, SendOptions options);
 
     /**
-     * Sends several messages in one statement, each with its own headers, returning their ids in
+     * Sends several messages as one batch, each with its own headers, returning their ids in
      * order.
      *
      * <p>Unlike {@link #sendBatch(String, List, SendOptions)}, which gives every message the same
@@ -211,7 +211,7 @@ public interface PgmqOperations {
     List<Long> sendMessages(String queue, List<OutboundMessage> messages);
 
     /**
-     * Sends several messages in one statement, each with its own headers, plus shared options.
+     * Sends several messages as one batch, each with its own headers, plus shared options.
      *
      * <p>Headers in {@code options} are defaults for every message; a message's own header of the
      * same name wins. The delay or delivery time in {@code options} applies to the whole batch,
@@ -243,10 +243,6 @@ public interface PgmqOperations {
      */
     <T> List<PgmqMessage<T>> pop(String queue, int count, Class<T> payloadType);
 
-    // ---------------------------------------------------------------------
-    // Acknowledgement
-    // ---------------------------------------------------------------------
-
     /**
      * Reads messages honouring FIFO group ordering, leaving payloads as raw JSON documents.
      *
@@ -275,6 +271,10 @@ public interface PgmqOperations {
      * @throws IllegalArgumentException if {@code options} carries a conditional filter
      */
     <T> List<PgmqMessage<T>> readGrouped(String queue, ReadOptions options, Class<T> payloadType);
+
+    // ---------------------------------------------------------------------
+    // Acknowledgement
+    // ---------------------------------------------------------------------
 
     /**
      * Deletes one message.
@@ -338,6 +338,9 @@ public interface PgmqOperations {
      * have left behind, in one statement, so attempts survive restarts and are shared by every
      * instance as they are in read mode. PGMQ has no function for it, so it updates the queue's
      * table directly.
+     *
+     * <p>Call it after the transaction has rolled back, not inside it: within that transaction the
+     * popped row does not exist.
      */
     void retryAfterRollback(String queue, long messageId, Duration delay);
 

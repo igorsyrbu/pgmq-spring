@@ -35,6 +35,7 @@ import io.github.pgmqspring.core.QueueNotFoundException;
 import io.github.pgmqspring.core.convert.JacksonPayloadConverter;
 import io.github.pgmqspring.core.convert.PayloadConversionException;
 
+import static io.github.pgmqspring.core.PgmqContainerSupport.newQueue;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 
@@ -53,14 +54,8 @@ class PgmqTemplateHardeningTests {
 
     @BeforeAll
     static void setUp() {
-        pgmq = new PgmqTemplate(PgmqContainerSupport.dataSource(), new JacksonPayloadConverter());
-        jdbc = pgmq.getJdbcTemplate();
-    }
-
-    private static String newQueue(String prefix) {
-        String queue = PgmqContainerSupport.uniqueQueueName(prefix);
-        pgmq.createQueue(queue);
-        return queue;
+        pgmq = PgmqContainerSupport.template();
+        jdbc = PgmqContainerSupport.jdbc();
     }
 
     @Test
@@ -161,7 +156,8 @@ class PgmqTemplateHardeningTests {
     @Test
     void deliverAtIsExactRegardlessOfTheJvmTimeZone() {
         String queue = newQueue("deliver_at");
-        java.time.Instant at = java.time.Instant.now().plusSeconds(3600).truncatedTo(java.time.temporal.ChronoUnit.SECONDS);
+        java.time.Instant at = java.time.Instant.now().plusSeconds(3600)
+                .truncatedTo(java.time.temporal.ChronoUnit.SECONDS);
         java.util.TimeZone original = java.util.TimeZone.getDefault();
         try {
             java.util.TimeZone.setDefault(java.util.TimeZone.getTimeZone("Pacific/Chatham"));

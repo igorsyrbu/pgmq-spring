@@ -28,8 +28,12 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
  *
  * <ul>
  *   <li>{@link OrderService} saves a row and sends a message in one transaction.
- *   <li>{@link OrderConsumerConfiguration} declares a listener container that consumes them.
- *   <li>Nothing else. No HTTP layer, no chunking, no dead-letter bookkeeping.
+ *   <li>{@link OrderConsumerConfiguration} declares the listener containers: a transactional one
+ *       with a transaction timeout, retries with backoff and dead-lettering, and one that
+ *       acknowledges in batches and wakes on insert notifications.
+ *   <li>A default header on every message sent, and the health indicator and metrics the starter
+ *       contributes, come from configuration alone.
+ *   <li>No HTTP layer and no chunking.
  * </ul>
  *
  * <p>For sending and consuming in batches see {@code sample-quickstart-batch}.

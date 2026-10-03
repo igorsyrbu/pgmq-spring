@@ -32,13 +32,11 @@ tasks.withType(Test).configureEach {
         events 'failed'
         exceptionFormat = 'full'
     }
-    // Forward the image selectors to the test JVM so the same suite can run across the PGMQ
-    // and Postgres matrix with -Dpgmq.image=...
-    ['pgmq.image'].each { key ->
-        def value = providers.systemProperty(key).orNull
-        if (value != null) {
-            systemProperty key, value
-        }
+    // Forward the image selector to the test JVM so the same suite can run across the PGMQ
+    // matrix with -Dpgmq.image=...
+    def pgmqImage = providers.systemProperty('pgmq.image').orNull
+    if (pgmqImage != null) {
+        systemProperty 'pgmq.image', pgmqImage
     }
 }
 

@@ -22,16 +22,15 @@ import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 
-import javax.sql.DataSource;
-
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
+import io.github.pgmqspring.core.ListenerContainers;
 import io.github.pgmqspring.core.PgmqContainerSupport;
 import io.github.pgmqspring.core.client.PgmqTemplate;
-import io.github.pgmqspring.core.convert.JacksonPayloadConverter;
 
+import static io.github.pgmqspring.core.PgmqContainerSupport.newQueue;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
@@ -40,28 +39,20 @@ class RetryBackoffIntegrationTests {
 
     private static PgmqTemplate pgmq;
 
-    private PgmqMessageListenerContainer<String> container;
+    @RegisterExtension
+    final ListenerContainers containers = new ListenerContainers();
 
     @BeforeAll
     static void setUp() {
-        DataSource dataSource = PgmqContainerSupport.dataSource();
-        pgmq = new PgmqTemplate(dataSource, new JacksonPayloadConverter());
-    }
-
-    @AfterEach
-    void stopContainer() {
-        if (this.container != null) {
-            this.container.stop();
-        }
+        pgmq = PgmqContainerSupport.template();
     }
 
     @Test
     void eachRetryWaitsTwiceAsLongAsTheOneBefore() {
-        String queue = PgmqContainerSupport.uniqueQueueName("retry_backoff");
-        pgmq.createQueue(queue);
+        String queue = newQueue("retry_backoff");
         List<Long> deliveredAtMillis = new CopyOnWriteArrayList<>();
 
-        this.container = PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
+        this.containers.start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
                 .options(ConsumerOptions.builder()
                         .retryDelay(Duration.ofSeconds(1))
                         .retryMultiplier(2.0)
@@ -74,14 +65,18 @@ class RetryBackoffIntegrationTests {
                     deliveredAtMillis.add(System.currentTimeMillis());
                     throw new IllegalStateException("always fails");
                 })
-                .build();
-        this.container.start();
+                .build());
         pgmq.send(queue, "doomed");
 
         await().atMost(Duration.ofSeconds(30)).until(() -> deliveredAtMillis.size() == 4);
-        // Delays of 1s, 2s and 4s; the upper bounds leave room for polling and a busy machine.
-        assertThat(deliveredAtMillis.get(1) - deliveredAtMillis.get(0)).isBetween(900L, 2500L);
-        assertThat(deliveredAtMillis.get(2) - deliveredAtMillis.get(1)).isBetween(1900L, 3500L);
-        assertThat(deliveredAtMillis.get(3) - deliveredAtMillis.get(2)).isBetween(3900L, 5500L);
+        long firstGap = deliveredAtMillis.get(1) - deliveredAtMillis.get(0);
+        long secondGap = deliveredAtMillis.get(2) - deliveredAtMillis.get(1);
+        long thirdGap = deliveredAtMillis.get(3) - deliveredAtMillis.get(2);
+        // Delays of 1s, 2s and 4s; only lower bounds, since a busy machine can only make them longer.
+        assertThat(firstGap).isGreaterThanOrEqualTo(900L);
+        assertThat(secondGap).isGreaterThanOrEqualTo(1900L);
+        assertThat(thirdGap).isGreaterThanOrEqualTo(3900L);
+        assertThat(secondGap).isGreaterThan((long) (firstGap * 1.5));
+        assertThat(thirdGap).isGreaterThan((long) (secondGap * 1.5));
     }
 }

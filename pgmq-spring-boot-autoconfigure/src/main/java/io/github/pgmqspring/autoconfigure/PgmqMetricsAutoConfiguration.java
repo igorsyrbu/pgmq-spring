@@ -19,12 +19,16 @@
 package io.github.pgmqspring.autoconfigure;
 
 import io.micrometer.core.instrument.MeterRegistry;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.SmartInitializingSingleton;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 
 import io.github.pgmqspring.core.client.PgmqOperations;
@@ -35,10 +39,10 @@ import io.github.pgmqspring.core.micrometer.PgmqQueueGauges;
 /**
  * Wires Micrometer instrumentation when a {@link MeterRegistry} is available.
  *
- * <p>The {@link PgmqMetrics} bean is registered on the {@link PgmqTemplate} as its producer-side
- * listener, and attached to every listener container bean as a {@code ConsumerListener}. The
- * configuration keys on {@link PgmqOperations}, so an application that supplies its own client
- * still gets the consumer meters and queue gauges.
+ * <p>The unique {@link PgmqMetrics} bean, whether defined here or by the application, is registered
+ * on the {@link PgmqTemplate} as its producer-side listener, and attached to every listener
+ * container bean as a {@code ConsumerListener}. The configuration keys on {@link PgmqOperations},
+ * so an application that supplies its own client still gets the consumer meters and queue gauges.
  */
 // afterName rather than after: these classes live in spring-boot-micrometer-metrics, which is an
 // optional dependency, so they must be referenced by name to avoid requiring them at runtime.
@@ -54,27 +58,12 @@ import io.github.pgmqspring.core.micrometer.PgmqQueueGauges;
         })
 @ConditionalOnClass(MeterRegistry.class)
 @ConditionalOnBean({MeterRegistry.class, PgmqOperations.class})
-@ConditionalOnProperty(prefix = "pgmq.metrics", name = "enabled", havingValue = "true", matchIfMissing = true)
+@ConditionalOnProperty(prefix = "pgmq", name = {"enabled", "metrics.enabled"}, havingValue = "true",
+        matchIfMissing = true)
+@EnableConfigurationProperties(PgmqProperties.class)
 public class PgmqMetricsAutoConfiguration {
 
-    private static final org.apache.commons.logging.Log logger =
-            org.apache.commons.logging.LogFactory.getLog(PgmqMetricsAutoConfiguration.class);
-
-    @Bean
-    @ConditionalOnMissingBean
-    public PgmqMetrics pgmqMetrics(MeterRegistry registry, PgmqOperations pgmq) {
-        PgmqMetrics metrics = new PgmqMetrics(registry);
-        if (pgmq instanceof PgmqTemplate template) {
-            template.setClientListener(metrics);
-        }
-        else {
-            // Send metrics are observed inside PgmqTemplate. A custom PgmqOperations still gets the
-            // consumer meters and gauges; it can record sends by delegating to a PgmqTemplate.
-            logger.info("The PgmqOperations bean is a " + pgmq.getClass().getName() + ", not a PgmqTemplate, so "
-                    + "pgmq.messages.sent and pgmq.send.duration are not recorded for it");
-        }
-        return metrics;
-    }
+    private static final Log logger = LogFactory.getLog(PgmqMetricsAutoConfiguration.class);
 
     /**
      * Attaches {@link PgmqMetrics} to every listener container bean. Static, as a
@@ -85,6 +74,37 @@ public class PgmqMetricsAutoConfiguration {
     static PgmqListenerContainerMetricsPostProcessor pgmqListenerContainerMetricsPostProcessor(
             ObjectProvider<PgmqMetrics> metrics) {
         return new PgmqListenerContainerMetricsPostProcessor(metrics);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public PgmqMetrics pgmqMetrics(MeterRegistry registry) {
+        return new PgmqMetrics(registry);
+    }
+
+    /**
+     * Registers the unique {@link PgmqMetrics} bean as the {@link PgmqTemplate}'s send listener once
+     * all singletons exist, so that it applies to an application-defined {@code PgmqMetrics} too.
+     */
+    @Bean
+    public SmartInitializingSingleton pgmqSendMetricsWiring(ObjectProvider<PgmqMetrics> metrics,
+            ObjectProvider<PgmqOperations> operations) {
+        return () -> {
+            PgmqMetrics listener = metrics.getIfUnique();
+            PgmqOperations pgmq = operations.getIfUnique();
+            if (listener == null || pgmq == null) {
+                return;
+            }
+            if (pgmq instanceof PgmqTemplate template) {
+                template.setClientListener(listener);
+            }
+            else {
+                // Send metrics are observed inside PgmqTemplate. A custom PgmqOperations still gets the
+                // consumer meters and gauges; it can record sends by delegating to a PgmqTemplate.
+                logger.info("The PgmqOperations bean is a " + pgmq.getClass().getName() + ", not a PgmqTemplate, "
+                        + "so pgmq.messages.sent and pgmq.send.duration are not recorded for it");
+            }
+        };
     }
 
     /**
@@ -99,7 +119,12 @@ public class PgmqMetricsAutoConfiguration {
     @ConditionalOnMissingBean
     public PgmqQueueGauges pgmqQueueGauges(PgmqOperations pgmq, PgmqProperties properties) {
         PgmqProperties.Metrics metrics = properties.getMetrics();
-        return new PgmqQueueGauges(pgmq, metrics.getQueues(), metrics.getRefreshInterval(),
-                metrics.getRefreshIntervals());
+        try {
+            return new PgmqQueueGauges(pgmq, metrics.getQueues(), metrics.getRefreshInterval(),
+                    metrics.getRefreshIntervals());
+        }
+        catch (IllegalArgumentException ex) {
+            throw new IllegalStateException("pgmq.metrics: " + ex.getMessage(), ex);
+        }
     }
 }

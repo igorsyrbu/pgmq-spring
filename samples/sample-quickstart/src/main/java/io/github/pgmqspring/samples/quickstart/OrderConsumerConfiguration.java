@@ -33,9 +33,9 @@ import io.github.pgmqspring.core.consumer.PgmqMessageListenerContainer;
  * Declares the listener containers: a transactional one for orders, and one for notifications
  * that acknowledges in batches.
  *
- * <p>It is a {@code SmartLifecycle}, so declaring it as a bean is all that is needed — it starts
- * and stops with the application context, and shuts down gracefully by draining in-flight work
- * without acknowledging it.
+ * <p>Each container is a {@code SmartLifecycle}, so declaring it as a bean is all that is needed:
+ * it starts and stops with the application context. On shutdown, handlers already running finish
+ * and are acknowledged; messages not yet picked up stay on the queue.
  */
 @Configuration(proxyBeanMethods = false)
 public class OrderConsumerConfiguration {

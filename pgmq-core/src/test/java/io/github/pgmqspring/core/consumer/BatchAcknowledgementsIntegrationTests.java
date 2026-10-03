@@ -18,29 +18,24 @@
 
 package io.github.pgmqspring.core.consumer;
 
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Proxy;
 import java.time.Duration;
-import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.IntStream;
 
-import javax.sql.DataSource;
-
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
-import org.springframework.jdbc.core.JdbcTemplate;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
+import io.github.pgmqspring.core.ListenerContainers;
 import io.github.pgmqspring.core.PgmqContainerSupport;
-import io.github.pgmqspring.core.PgmqException;
-import io.github.pgmqspring.core.client.PgmqOperations;
+import io.github.pgmqspring.core.RecordingOperations;
 import io.github.pgmqspring.core.client.PgmqTemplate;
-import io.github.pgmqspring.core.convert.JacksonPayloadConverter;
 
+import static io.github.pgmqspring.core.PgmqContainerSupport.countRows;
+import static io.github.pgmqspring.core.PgmqContainerSupport.newQueue;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 import static org.awaitility.Awaitility.await;
@@ -53,53 +48,25 @@ class BatchAcknowledgementsIntegrationTests {
 
     private static PgmqTemplate pgmq;
 
-    private static JdbcTemplate jdbc;
-
-    private final ConcurrentLinkedQueue<PgmqMessageListenerContainer<?>> containers = new ConcurrentLinkedQueue<>();
+    @RegisterExtension
+    final ListenerContainers containers = new ListenerContainers();
 
     @BeforeAll
     static void setUp() {
-        DataSource dataSource = PgmqContainerSupport.dataSource();
-        pgmq = new PgmqTemplate(dataSource, new JacksonPayloadConverter());
-        jdbc = new JdbcTemplate(dataSource);
-    }
-
-    @AfterEach
-    void stopContainers() {
-        PgmqMessageListenerContainer<?> container;
-        while ((container = this.containers.poll()) != null) {
-            container.stop();
-        }
-    }
-
-    private static String newQueue(String prefix) {
-        String queue = PgmqContainerSupport.uniqueQueueName(prefix);
-        pgmq.createQueue(queue);
-        return queue;
-    }
-
-    private <T> PgmqMessageListenerContainer<T> start(PgmqMessageListenerContainer<T> container) {
-        this.containers.add(container);
-        container.start();
-        return container;
-    }
-
-    private static int count(String table) {
-        Integer n = jdbc.queryForObject("select count(*) from pgmq." + table, Integer.class);
-        return n != null ? n : 0;
+        pgmq = PgmqContainerSupport.template();
     }
 
     private static List<Map<String, Integer>> payloads(int count) {
-        return java.util.stream.IntStream.rangeClosed(1, count).mapToObj((n) -> Map.of("n", n)).toList();
+        return IntStream.rangeClosed(1, count).mapToObj((n) -> Map.of("n", n)).toList();
     }
 
     @Test
     void aBatchOfTenIsDeletedWithOneStatement() {
         String queue = newQueue("batch_ack_delete");
         pgmq.sendBatch(queue, payloads(10));
-        RecordingOperations recording = new RecordingOperations();
+        RecordingOperations recording = new RecordingOperations(pgmq);
 
-        start(PgmqMessageListenerContainer.builder(recording.proxy(), queue, String.class)
+        this.containers.start(PgmqMessageListenerContainer.builder(recording.proxy(), queue, String.class)
                 .options(ConsumerOptions.builder()
                         .batchSize(10)
                         .batchAcknowledgements(true)
@@ -108,7 +75,7 @@ class BatchAcknowledgementsIntegrationTests {
                 .handler((message) -> { })
                 .build());
 
-        await().atMost(Duration.ofSeconds(20)).until(() -> count("q_" + queue) == 0);
+        await().atMost(Duration.ofSeconds(20)).until(() -> countRows("pgmq.q_" + queue) == 0);
         assertThat(recording.acknowledgements()).containsExactly("delete[10]");
     }
 
@@ -116,9 +83,9 @@ class BatchAcknowledgementsIntegrationTests {
     void archivesWithOneStatementAndFlushesEarlyAtAckBatchSize() {
         String queue = newQueue("batch_ack_archive");
         pgmq.sendBatch(queue, payloads(10));
-        RecordingOperations recording = new RecordingOperations();
+        RecordingOperations recording = new RecordingOperations(pgmq);
 
-        start(PgmqMessageListenerContainer.builder(recording.proxy(), queue, String.class)
+        this.containers.start(PgmqMessageListenerContainer.builder(recording.proxy(), queue, String.class)
                 .options(ConsumerOptions.builder()
                         .batchSize(10)
                         .acknowledgeMode(AcknowledgeMode.ARCHIVE)
@@ -129,8 +96,8 @@ class BatchAcknowledgementsIntegrationTests {
                 .handler((message) -> { })
                 .build());
 
-        await().atMost(Duration.ofSeconds(20)).until(() -> count("q_" + queue) == 0);
-        assertThat(count("a_" + queue)).isEqualTo(10);
+        await().atMost(Duration.ofSeconds(20)).until(() -> countRows("pgmq.q_" + queue) == 0);
+        assertThat(countRows("pgmq.a_" + queue)).isEqualTo(10);
         assertThat(recording.acknowledgements()).containsExactly("archive[4]", "archive[4]", "archive[2]");
     }
 
@@ -138,11 +105,11 @@ class BatchAcknowledgementsIntegrationTests {
     void aFailedFlushRedeliversTheBatchWithoutTreatingItAsAHandlerFailure() {
         String queue = newQueue("batch_ack_flush_fails");
         pgmq.sendBatch(queue, payloads(3));
-        RecordingOperations recording = new RecordingOperations();
-        recording.failNextAcknowledgements(1);
+        RecordingOperations recording = new RecordingOperations(pgmq);
+        recording.failNext(1, (call) -> call.startsWith("delete[") || call.startsWith("archive["));
         ConcurrentLinkedQueue<Integer> readCounts = new ConcurrentLinkedQueue<>();
 
-        start(PgmqMessageListenerContainer.builder(recording.proxy(), queue, String.class)
+        this.containers.start(PgmqMessageListenerContainer.builder(recording.proxy(), queue, String.class)
                 .options(ConsumerOptions.builder()
                         .batchSize(10)
                         .visibilityTimeout(Duration.ofSeconds(1))
@@ -153,7 +120,7 @@ class BatchAcknowledgementsIntegrationTests {
                 .handler((message) -> readCounts.add(message.readCount()))
                 .build());
 
-        await().atMost(Duration.ofSeconds(20)).until(() -> count("q_" + queue) == 0);
+        await().atMost(Duration.ofSeconds(20)).until(() -> countRows("pgmq.q_" + queue) == 0);
         assertThat(readCounts).containsExactlyInAnyOrder(1, 1, 1, 2, 2, 2);
         assertThat(recording.acknowledgements()).containsExactly("delete[3]", "delete[3]");
         // No retry delay was applied: the handlers had succeeded.
@@ -169,7 +136,7 @@ class BatchAcknowledgementsIntegrationTests {
         // The first message is handled at once, then waits ~4s for its batch-mates before its delete
         // is sent - longer than the 3s visibility timeout. Unless the lease keeps covering it while
         // it is pending, the second polling loop reads it again.
-        start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
+        this.containers.start(PgmqMessageListenerContainer.builder(pgmq, queue, String.class)
                 .options(ConsumerOptions.builder()
                         .concurrency(2)
                         .batchSize(3)
@@ -188,7 +155,7 @@ class BatchAcknowledgementsIntegrationTests {
                 .build());
         pgmq.sendBatch(queue, payloads(3));
 
-        await().atMost(Duration.ofSeconds(30)).until(() -> count("q_" + queue) == 0);
+        await().atMost(Duration.ofSeconds(30)).until(() -> countRows("pgmq.q_" + queue) == 0);
         await().during(Duration.ofSeconds(1)).atMost(Duration.ofSeconds(5)).until(() -> readCounts.size() == 3);
         assertThat(readCounts).containsOnly(1);
     }
@@ -208,50 +175,5 @@ class BatchAcknowledgementsIntegrationTests {
         ConsumerOptions options = ConsumerOptions.builder().batchAcknowledgements(true).ackBatchSize(5).build();
         assertThat(options.toBuilder().build().toString()).isEqualTo(options.toString())
                 .contains("batchAcknowledgements=true", "ackBatchSize=5");
-    }
-
-    /**
-     * Records every {@link PgmqOperations} call the container makes, and can fail chosen batch
-     * acknowledgements, so a test can assert how many statements a batch cost.
-     */
-    static final class RecordingOperations {
-
-        private final List<String> calls = new CopyOnWriteArrayList<>();
-
-        private final AtomicInteger failingAcknowledgements = new AtomicInteger();
-
-        void failNextAcknowledgements(int count) {
-            this.failingAcknowledgements.set(count);
-        }
-
-        List<String> calls() {
-            return this.calls.stream().map((call) -> call.replaceAll("\\[.*", "")).toList();
-        }
-
-        /** Delete and archive calls, as {@code delete[n]} for n ids or {@code delete} for one. */
-        List<String> acknowledgements() {
-            return this.calls.stream().filter((call) -> call.startsWith("delete") || call.startsWith("archive"))
-                    .toList();
-        }
-
-        PgmqOperations proxy() {
-            return (PgmqOperations) Proxy.newProxyInstance(getClass().getClassLoader(),
-                    new Class<?>[] {PgmqOperations.class}, (proxy, method, args) -> {
-                        String name = method.getName();
-                        boolean many = args != null && args.length > 1 && args[1] instanceof Collection<?>;
-                        String call = many ? name + "[" + ((Collection<?>) args[1]).size() + "]" : name;
-                        this.calls.add(call);
-                        if (many && (name.equals("delete") || name.equals("archive"))
-                                && this.failingAcknowledgements.getAndUpdate((n) -> Math.max(0, n - 1)) > 0) {
-                            throw new PgmqException("simulated failure of " + call);
-                        }
-                        try {
-                            return method.invoke(pgmq, args);
-                        }
-                        catch (InvocationTargetException ex) {
-                            throw ex.getCause();
-                        }
-                    });
-        }
     }
 }

@@ -110,11 +110,13 @@ all-or-nothing, and splitting it must not quietly change that: a failure in the 
 two committed ones would leave the caller with an exception, no ids, and messages it cannot
 identify to resend or clean up. So the chunks join the transaction bound to the client's
 `DataSource` when there is one, and otherwise run in a transaction the client opens with a
-`DataSourceTransactionManager` of its own. Whether a transaction is bound is decided by
-`TransactionSynchronizationManager.hasResource(dataSource)`, not by "is any transaction active":
-a transaction on another data source, or a JPA transaction manager that exposes a connection
-without marking it active, must not make the client either skip its own transaction or try to
-start a nested one on an already-bound connection.
+`DataSourceTransactionManager` of its own, created once. The chunks join only when a transaction
+is actually active *and* a connection is bound for this `DataSource`: a transaction on another
+data source must not stop the client from opening its own, and a connection bound without one -
+synchronization only - is taken over and made transactional by that manager rather than used in
+autocommit. Listeners hear of the batch once, after its last chunk, since an earlier chunk can
+still roll back. PGMQ before 1.7 has no `pop` with a quantity, so a multi-message pop there runs
+its single pops in one transaction the same way.
 
 ### Whole seconds
 
@@ -186,8 +188,15 @@ alternative is silent loss. Following from that:
 - **Conversion happens after the read, per message.** Rows are mapped as raw JSON and converted
   one by one, so a payload that cannot be converted fails only that message - which then counts
   towards `maxAttempts` - instead of failing a poll whose whole batch PGMQ has already leased.
-- **A settlement counts only once it has succeeded.** If an `Acknowledgement` call throws, the
-  message falls through to the failure action.
+- **A settlement counts only once it has succeeded.** If a handler's own `Acknowledgement` call
+  throws, the message falls through to the failure action.
+- **A failed acknowledgement is not a failed handler.** When the container's own acknowledgement
+  fails after a handler succeeded outside a transaction, the message is left for redelivery - it
+  is not retried with a delay, archived or dead-lettered as though its handler had thrown. Inside
+  a transaction the acknowledgement commits with the handler's writes, so its failure rolls both
+  back and is a failure of the attempt.
+- **A stop is not a failure.** A handler interrupted because it outlasted the shutdown timeout,
+  and a poll interrupted by stopping, touch nothing and record no failure or poll error.
 - **A handler that settles and then throws** keeps its settlement outside a transaction; the
   failure action is not applied on top of it. Inside a transaction the rollback undoes the
   settlement, and the failure action applies.
@@ -214,7 +223,10 @@ ways - while the listening connection is being re-established, for messages that
 without an insert (a delayed send, a retry, a released lease), and when PGMQ's per-queue throttle
 drops them. That throttle discards notifications within its interval instead of deferring them, so
 after every wake-up a loop restarts its backoff from `pollDelay`, polling a few times at short
-intervals before slowing down again. Retries the container itself schedules wake it when due.
+intervals before slowing down again. Retries the container itself schedules wake it when due,
+coalesced to one wake-up per second. With `groupOrdered`, acknowledging a message makes the next
+one of its group readable without an insert, so other idle loops and instances find it on their
+next regular poll rather than at once.
 
 Waits between polls are on a generation counter rather than a sleep: a loop records the generation
 before it polls and waits for a later one, so a notification arriving during a poll is never
@@ -229,6 +241,18 @@ a `compileOnly` dependency, checked when a `NOTIFY` container is built. Queue na
 `enable_notify_insert` lower-cased, because PGMQ stores the name as given but its trigger looks the
 throttle up by the lower-cased table name, so a mixed-case name would never notify.
 
+### Long polling and backoff
+
+After an empty long poll the loop polls again at once: the database already waited, and sleeping
+on top of it would delay messages sent meanwhile by up to `maxPollDelay`. Only plain polls back off.
+After a failed poll a loop waits `maxPollDelay` whatever happens meanwhile - a notification ends
+an idle wait, but not this one, or a persistent failure would be retried once per insert; stopping
+ends both.
+
+A message released on pause or stop keeps the read count its read gave it, so one released over
+and over drifts towards `maxAttempts` without being handled. Pausing is meant to be rare enough for
+that not to matter.
+
 ### Transactional pop counts attempts in the row
 
 `TRANSACTIONAL_POP` pops inside the handler's transaction, which halves the writes per message but
@@ -242,8 +266,11 @@ is presented as `read_ct + 1`, the attempt in progress, so `maxAttempts`, poison
 retry backoff and the read count handlers see mean what they do in read mode. A message that
 cannot be delivered - poison, or a payload that does not convert - rolls the whole transaction
 back too, so that it can be retried, archived or dead-lettered on its restored row: a popped row
-cannot be passed to `pgmq.archive`. What cannot be counted is a handler that kills the JVM before
-the rollback; that message is retried for ever. `pop` takes its rows `FOR UPDATE SKIP LOCKED` on
+cannot be passed to `pgmq.archive`. When dead-lettering is the fate of every such message in a
+popped batch, they are dead-lettered inside the popping transaction instead, so that no other
+consumer can pop them between the rollback and the move and dead-letter them a second time. What
+cannot be counted is a handler that kills the JVM before the rollback; that message is retried for
+ever. `pop` takes its rows `FOR UPDATE SKIP LOCKED` on
 every supported version, so an uncommitted pop is skipped by every other consumer.
 
 ### Leases cover the batch

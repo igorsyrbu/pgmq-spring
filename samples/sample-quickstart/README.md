@@ -25,7 +25,6 @@ consumes**. No HTTP layer, no chunking, no bookkeeping. Start here.
 docker run -d --name pgmq -e POSTGRES_PASSWORD=postgres -p 5432:5432 \
     ghcr.io/pgmq/pg17-pgmq:v1.13.0
 
-
 ./gradlew :samples:sample-quickstart:run
 ```
 

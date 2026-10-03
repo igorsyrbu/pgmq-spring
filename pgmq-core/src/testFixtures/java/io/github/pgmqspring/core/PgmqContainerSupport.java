@@ -28,6 +28,9 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 import org.testcontainers.utility.DockerImageName;
 
+import io.github.pgmqspring.core.client.PgmqTemplate;
+import io.github.pgmqspring.core.convert.JacksonPayloadConverter;
+
 /**
  * Shared Postgres+PGMQ container for integration tests.
  *
@@ -52,6 +55,10 @@ public final class PgmqContainerSupport {
     private static volatile PostgreSQLContainer container;
 
     private static volatile HikariDataSource dataSource;
+
+    private static volatile PgmqTemplate template;
+
+    private static volatile JdbcTemplate jdbc;
 
     private PgmqContainerSupport() {
     }
@@ -98,5 +105,39 @@ public final class PgmqContainerSupport {
     /** A queue name unique to this JVM run, so tests never collide. */
     public static String uniqueQueueName(String prefix) {
         return QueueNames.validate(prefix + "_" + QUEUE_SEQUENCE.incrementAndGet());
+    }
+
+    /** A name unique to this JVM run for anything that is not a queue, such as a database or a role. */
+    public static String uniqueName(String prefix) {
+        return prefix + "_" + QUEUE_SEQUENCE.incrementAndGet();
+    }
+
+    /** The shared {@link PgmqTemplate} on {@link #dataSource()}, converting payloads with Jackson. */
+    public static synchronized PgmqTemplate template() {
+        if (template == null) {
+            template = new PgmqTemplate(dataSource(), new JacksonPayloadConverter());
+        }
+        return template;
+    }
+
+    /** The shared {@link JdbcTemplate} on {@link #dataSource()}. */
+    public static synchronized JdbcTemplate jdbc() {
+        if (jdbc == null) {
+            jdbc = new JdbcTemplate(dataSource());
+        }
+        return jdbc;
+    }
+
+    /** Creates a queue with a {@linkplain #uniqueQueueName unique name} through {@link #template()}. */
+    public static String newQueue(String prefix) {
+        String queue = uniqueQueueName(prefix);
+        template().createQueue(queue);
+        return queue;
+    }
+
+    /** The row count of {@code table}, schema-qualified, for example {@code pgmq.q_orders}. */
+    public static int countRows(String table) {
+        Integer count = jdbc().queryForObject("select count(*) from " + table, Integer.class);
+        return count != null ? count : 0;
     }
 }

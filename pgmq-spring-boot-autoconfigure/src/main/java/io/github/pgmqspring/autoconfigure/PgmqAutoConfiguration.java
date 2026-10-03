@@ -21,6 +21,7 @@ package io.github.pgmqspring.autoconfigure;
 import javax.sql.DataSource;
 
 import org.springframework.beans.factory.BeanFactory;
+import org.springframework.beans.factory.NoUniqueBeanDefinitionException;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.LazyInitializationExcludeFilter;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -52,6 +53,26 @@ import io.github.pgmqspring.core.convert.PayloadConverter;
 public class PgmqAutoConfiguration {
 
     /**
+     * Creates the containers declared under {@code pgmq.consumers}. Static, as a
+     * {@code BeanDefinitionRegistryPostProcessor} must be, so it does not instantiate this class early.
+     */
+    @Bean
+    static PgmqDeclaredConsumersRegistrar pgmqDeclaredConsumersRegistrar() {
+        return new PgmqDeclaredConsumersRegistrar();
+    }
+
+    /**
+     * Keeps {@link PgmqInitializer} eager under {@code spring.main.lazy-initialization=true}.
+     * Nothing depends on it - it exists for its side effects - so a lazy context would otherwise
+     * never create it, and never verify PGMQ or create the configured queues. Listener containers
+     * need no such exclusion: Spring creates every {@code SmartLifecycle} bean to start it, lazy or not.
+     */
+    @Bean
+    static LazyInitializationExcludeFilter pgmqInitializerLazyInitializationExcludeFilter() {
+        return LazyInitializationExcludeFilter.forBeanTypes(PgmqInitializer.class);
+    }
+
+    /**
      * The payload converter, defaulting to whichever Jackson generation is on the classpath and
      * reusing the application's Spring-managed mapper when there is one.
      */
@@ -74,7 +95,12 @@ public class PgmqAutoConfiguration {
             BeanFactory beanFactory) {
         DataSource dataSource = resolveDataSource(properties, beanFactory);
         PgmqTemplate template = new PgmqTemplate(new JdbcTemplate(dataSource), payloadConverter);
-        template.setMaxBatchSize(properties.getProducer().getMaxBatchSize());
+        try {
+            template.setMaxBatchSize(properties.getProducer().getMaxBatchSize());
+        }
+        catch (IllegalArgumentException ex) {
+            throw new IllegalStateException("pgmq.producer.max-batch-size: " + ex.getMessage(), ex);
+        }
         template.setDefaultHeaders(properties.getProducer().getDefaultHeaders());
         return template;
     }
@@ -83,56 +109,12 @@ public class PgmqAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean
     public ConsumerOptions pgmqConsumerOptions(PgmqProperties properties) {
-        return consumerOptions(properties.getConsumer());
-    }
-
-    /**
-     * Creates the containers declared under {@code pgmq.consumers}. Static, as a
-     * {@code BeanDefinitionRegistryPostProcessor} must be, so it does not instantiate this class early.
-     */
-    @Bean
-    static PgmqDeclaredConsumersRegistrar pgmqDeclaredConsumersRegistrar() {
-        return new PgmqDeclaredConsumersRegistrar();
-    }
-
-    static ConsumerOptions consumerOptions(PgmqProperties.Consumer consumer) {
-        return ConsumerOptions.builder()
-                .concurrency(consumer.getConcurrency())
-                .batchSize(consumer.getBatchSize())
-                .visibilityTimeout(consumer.getVisibilityTimeout())
-                .pollDelay(consumer.getPollDelay())
-                .maxPollDelay(consumer.getMaxPollDelay())
-                .pollJitter(consumer.getPollJitter())
-                .longPoll(consumer.getLongPoll())
-                .wakeUp(consumer.getWakeUp())
-                .consumeMode(consumer.getConsumeMode())
-                .acknowledgeMode(consumer.getAcknowledgeMode())
-                .groupOrdered(consumer.isGroupOrdered())
-                .groupStrategy(consumer.getGroupStrategy())
-                .failureAction(consumer.getFailureAction())
-                .retryDelay(consumer.getRetryDelay())
-                .retryMultiplier(consumer.getRetryMultiplier())
-                .maxRetryDelay(consumer.getMaxRetryDelay())
-                .maxAttempts(consumer.getMaxAttempts())
-                .nonRetryableExceptions(consumer.getNonRetryableExceptions())
-                .deadLetterQueue(consumer.getDeadLetterQueue())
-                .transactional(consumer.isTransactional())
-                .transactionTimeout(consumer.getTransactionTimeout())
-                .extendLease(consumer.isExtendLease())
-                .batchAcknowledgements(consumer.isBatchAcknowledgements())
-                .ackBatchSize(consumer.getAckBatchSize())
-                .shutdownTimeout(consumer.getShutdownTimeout())
-                .build();
-    }
-
-    /**
-     * Keeps {@link PgmqInitializer} eager under {@code spring.main.lazy-initialization=true}.
-     * Nothing depends on it - it exists for its side effects - so a lazy context would otherwise
-     * never create it, and never verify PGMQ or create the configured queues.
-     */
-    @Bean
-    static LazyInitializationExcludeFilter pgmqInitializerLazyInitializationExcludeFilter() {
-        return LazyInitializationExcludeFilter.forBeanTypes(PgmqInitializer.class);
+        try {
+            return properties.getConsumer().toOptions();
+        }
+        catch (IllegalArgumentException ex) {
+            throw new IllegalStateException("pgmq.consumer: " + ex.getMessage(), ex);
+        }
     }
 
     /** Verifies the installation and creates configured queues before the application serves traffic. */
@@ -148,6 +130,12 @@ public class PgmqAutoConfiguration {
         if (name != null && !name.isBlank()) {
             return beanFactory.getBean(name, DataSource.class);
         }
-        return beanFactory.getBean(DataSource.class);
+        try {
+            return beanFactory.getBean(DataSource.class);
+        }
+        catch (NoUniqueBeanDefinitionException ex) {
+            throw new IllegalStateException("There are several DataSource beans and none is primary; set "
+                    + "pgmq.datasource to the name of the one PGMQ should use", ex);
+        }
     }
 }

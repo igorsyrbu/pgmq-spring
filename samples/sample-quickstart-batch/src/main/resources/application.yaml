@@ -24,7 +24,6 @@ pgmq:
     queues:
       - readings
 
-
 logging:
   level:
     io.github.pgmqspring: INFO

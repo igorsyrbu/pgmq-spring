@@ -24,6 +24,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 import org.jspecify.annotations.Nullable;
+import org.springframework.util.Assert;
 
 /**
  * Options for a send operation: headers and an optional delivery delay.
@@ -84,6 +85,8 @@ public final class SendOptions {
 
     /** Returns a copy with one additional header. */
     public SendOptions withHeader(String name, Object value) {
+        Assert.notNull(name, "header name must not be null");
+        Assert.notNull(value, "header value must not be null");
         Map<String, Object> merged = new LinkedHashMap<>(this.headers);
         merged.put(name, value);
         return new SendOptions(Map.copyOf(merged), this.delay, this.deliverAt);

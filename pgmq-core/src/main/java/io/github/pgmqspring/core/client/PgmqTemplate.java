@@ -31,13 +31,17 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 import javax.sql.DataSource;
 
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.jspecify.annotations.Nullable;
 import org.springframework.dao.DataAccessException;
 import org.springframework.dao.EmptyResultDataAccessException;
@@ -94,8 +98,17 @@ import io.github.pgmqspring.core.convert.PayloadConverter;
  */
 public class PgmqTemplate implements PgmqOperations {
 
-    private static final org.apache.commons.logging.Log LOGGER =
-            org.apache.commons.logging.LogFactory.getLog(PgmqTemplate.class);
+    private static final Log logger = LogFactory.getLog(PgmqTemplate.class);
+
+    /** PGMQ's own defaults for {@code create_partitioned}, which it documents but does not let callers omit. */
+    private static final String DEFAULT_PARTITION_INTERVAL = "10000";
+
+    private static final String DEFAULT_RETENTION_INTERVAL = "100000";
+
+    /** How often {@code read_with_poll} re-checks when the caller set no interval; PGMQ's own default. */
+    private static final int DEFAULT_POLL_INTERVAL_MILLIS = 100;
+
+    private static final RowMapper<Long> FIRST_COLUMN = (rs, rowNum) -> rs.getLong(1);
 
     // Sends always target the 4-argument overload so exactly one candidate matches.
     private static final String SQL_SEND_DELAY_SECONDS =
@@ -229,6 +242,11 @@ public class PgmqTemplate implements PgmqOperations {
 
     private volatile @Nullable PgmqCapabilities capabilities;
 
+    /** Not a monitor: detection runs JDBC under it, which would pin a virtual thread on JDK 21-23. */
+    private final ReentrantLock capabilitiesLock = new ReentrantLock();
+
+    private volatile @Nullable TransactionTemplate localTransaction;
+
     private volatile PgmqClientListener clientListener = new PgmqClientListener() {
     };
 
@@ -332,19 +350,12 @@ public class PgmqTemplate implements PgmqOperations {
 
     @Override
     public void createQueue(String queue, QueueKind kind) {
-        QueueNames.validate(queue);
-        String sql = switch (kind) {
-            case STANDARD -> SQL_CREATE;
-            case UNLOGGED -> SQL_CREATE_UNLOGGED;
-            case PARTITIONED -> null;
-        };
-        if (sql == null) {
-            // create_partitioned's interval defaults live in PGMQ, so call the 1-arg-equivalent
-            // form by passing PGMQ's own documented defaults rather than inventing our own.
-            createPartitionedQueue(queue, "10000", "100000");
+        if (kind == QueueKind.PARTITIONED) {
+            createPartitionedQueue(queue, DEFAULT_PARTITION_INTERVAL, DEFAULT_RETENTION_INTERVAL);
             return;
         }
-        execute(queue, sql, queue);
+        QueueNames.validate(queue);
+        execute(queue, kind == QueueKind.UNLOGGED ? SQL_CREATE_UNLOGGED : SQL_CREATE, queue);
     }
 
     @Override
@@ -356,8 +367,7 @@ public class PgmqTemplate implements PgmqOperations {
     @Override
     public boolean dropQueue(String queue) {
         QueueNames.validate(queue);
-        Boolean dropped = this.jdbcTemplate.queryForObject(SQL_DROP, Boolean.class, queue);
-        return Boolean.TRUE.equals(dropped);
+        return Boolean.TRUE.equals(queryOne(queue, SQL_DROP, Boolean.class, queue));
     }
 
     @Override
@@ -376,11 +386,11 @@ public class PgmqTemplate implements PgmqOperations {
 
     @Override
     public List<QueueInfo> listQueues() {
-        return this.jdbcTemplate.query(SQL_LIST_QUEUES, (rs, rowNum) -> new QueueInfo(
+        return withoutQueue("list_queues", () -> this.jdbcTemplate.query(SQL_LIST_QUEUES, (rs, rowNum) -> new QueueInfo(
                 rs.getString("queue_name"),
                 rs.getBoolean("is_partitioned"),
                 rs.getBoolean("is_unlogged"),
-                offsetDateTime(rs, "created_at")));
+                offsetDateTime(rs, "created_at"))));
     }
 
     @Override
@@ -400,11 +410,13 @@ public class PgmqTemplate implements PgmqOperations {
     @Override
     public void enableNotifyInsert(String queue, Duration throttle) {
         QueueNames.validate(queue);
-        Assert.isTrue(throttle != null && !throttle.isNegative(), "throttle must not be negative");
+        Assert.notNull(throttle, "throttle must not be null");
+        Assert.isTrue(!throttle.isNegative(), "throttle must not be negative");
         requireInsertNotify();
-        long millis = throttle.toMillis() + (throttle.toNanosPart() % 1_000_000 > 0 ? 1 : 0);
-        execute(queue, SQL_ENABLE_NOTIFY_INSERT_THROTTLED, QueueNames.normalize(queue),
-                (int) Math.min(Integer.MAX_VALUE, millis));
+        int millis = throttle.compareTo(Duration.ofMillis(Integer.MAX_VALUE)) >= 0
+                ? Integer.MAX_VALUE
+                : (int) (throttle.toMillis() + (throttle.toNanosPart() % 1_000_000 > 0 ? 1 : 0));
+        execute(queue, SQL_ENABLE_NOTIFY_INSERT_THROTTLED, QueueNames.normalize(queue), millis);
     }
 
     @Override
@@ -423,14 +435,9 @@ public class PgmqTemplate implements PgmqOperations {
             return null;
         }
         String normalized = QueueNames.normalize(queue);
-        try {
-            List<Integer> throttle = this.jdbcTemplate.queryForList(SQL_NOTIFY_INSERT_THROTTLE, Integer.class,
-                    normalized, "q_" + normalized);
-            return throttle.isEmpty() ? null : Duration.ofMillis(throttle.get(0));
-        }
-        catch (DataAccessException ex) {
-            throw translate(queue, ex);
-        }
+        List<Integer> throttle = onQueue(queue, () -> this.jdbcTemplate.queryForList(SQL_NOTIFY_INSERT_THROTTLE,
+                Integer.class, normalized, "q_" + normalized));
+        return throttle.isEmpty() ? null : Duration.ofMillis(throttle.get(0));
     }
 
     private void requireInsertNotify() {
@@ -442,26 +449,22 @@ public class PgmqTemplate implements PgmqOperations {
     @Override
     public QueueMetrics metrics(String queue) {
         QueueNames.validate(queue);
-        try {
-            List<QueueMetrics> results = this.jdbcTemplate.query(SQL_METRICS, metricsMapper(), queue);
-            if (results.isEmpty()) {
-                throw new QueueNotFoundException(queue, null);
-            }
-            return results.get(0);
+        List<QueueMetrics> results = onQueue(queue, () -> this.jdbcTemplate.query(SQL_METRICS, metricsMapper(), queue));
+        if (results.isEmpty()) {
+            throw new QueueNotFoundException(queue, null);
         }
-        catch (DataAccessException ex) {
-            throw translate(queue, ex);
-        }
+        return results.get(0);
     }
 
     @Override
     public List<QueueMetrics> metricsAll() {
-        return this.jdbcTemplate.query(SQL_METRICS_ALL, metricsMapper());
+        return withoutQueue("metrics_all", () -> this.jdbcTemplate.query(SQL_METRICS_ALL, metricsMapper()));
     }
 
     private RowMapper<QueueMetrics> metricsMapper() {
+        ColumnNames columnNames = new ColumnNames();
         return (rs, rowNum) -> {
-            Set<String> columns = columnNames(rs);
+            Set<String> columns = columnNames.of(rs);
             return new QueueMetrics(
                     rs.getString("queue_name"),
                     rs.getLong("queue_length"),
@@ -578,19 +581,26 @@ public class PgmqTemplate implements PgmqOperations {
     private List<Long> sendBatchStatements(String queue, List<String> payloads, @Nullable List<String> headers,
             SendOptions options) {
         Integer chunkSize = this.maxBatchSize;
+        long startedAt = System.nanoTime();
+        List<Long> ids;
         if (chunkSize == null || payloads.size() <= chunkSize) {
-            return sendBatchStatement(queue, jsonStringArrayOf(payloads), headers != null ? jsonArrayOf(headers) : null,
+            ids = sendBatchStatement(queue, jsonStringArrayOf(payloads), headers != null ? jsonArrayOf(headers) : null,
                     options);
         }
-        return inOneTransaction(() -> {
-            List<Long> ids = new ArrayList<>(payloads.size());
-            for (int from = 0; from < payloads.size(); from += chunkSize) {
-                int to = Math.min(from + chunkSize, payloads.size());
-                ids.addAll(sendBatchStatement(queue, jsonStringArrayOf(payloads.subList(from, to)),
-                        headers != null ? jsonArrayOf(headers.subList(from, to)) : null, options));
-            }
-            return ids;
-        });
+        else {
+            // Listeners hear of the batch once, after its last chunk: an earlier chunk can still roll back.
+            ids = inOneTransaction(() -> {
+                List<Long> sent = new ArrayList<>(payloads.size());
+                for (int from = 0; from < payloads.size(); from += chunkSize) {
+                    int to = Math.min(from + chunkSize, payloads.size());
+                    sent.addAll(sendBatchStatement(queue, jsonStringArrayOf(payloads.subList(from, to)),
+                            headers != null ? jsonArrayOf(headers.subList(from, to)) : null, options));
+                }
+                return sent;
+            });
+        }
+        notifySent(queue, ids, startedAt);
+        return ids;
     }
 
     /**
@@ -599,13 +609,23 @@ public class PgmqTemplate implements PgmqOperations {
      */
     private <T> T inOneTransaction(Supplier<T> statements) {
         DataSource dataSource = this.jdbcTemplate.getDataSource();
-        if (dataSource == null || TransactionSynchronizationManager.hasResource(dataSource)) {
+        if (dataSource == null || (TransactionSynchronizationManager.isActualTransactionActive()
+                && TransactionSynchronizationManager.hasResource(dataSource))) {
             return statements.get();
         }
-        T result = new TransactionTemplate(new DataSourceTransactionManager(dataSource))
-                .execute((status) -> statements.get());
+        T result = localTransaction(dataSource).execute((status) -> statements.get());
         Assert.state(result != null, "the statements returned no result");
         return result;
+    }
+
+    private TransactionTemplate localTransaction(DataSource dataSource) {
+        TransactionTemplate current = this.localTransaction;
+        if (current == null) {
+            // A connection bound without a transaction is reused and made transactional by the manager.
+            current = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
+            this.localTransaction = current;
+        }
+        return current;
     }
 
     private List<Long> sendBatchStatement(String queue, String payloadArray, @Nullable String headerArray,
@@ -614,15 +634,7 @@ public class PgmqTemplate implements PgmqOperations {
                 ? new Object[] {queue, payloadArray, headerArray, timestamptz(options.getDeliverAt())}
                 : new Object[] {queue, payloadArray, headerArray, delaySeconds(options)};
         String sql = options.getDeliverAt() != null ? SQL_SEND_BATCH_DELIVER_AT : SQL_SEND_BATCH_DELAY_SECONDS;
-        long startedAt = System.nanoTime();
-        try {
-            List<Long> ids = this.jdbcTemplate.query(sql, (rs, rowNum) -> rs.getLong(1), args);
-            notifySent(queue, ids, startedAt);
-            return ids;
-        }
-        catch (DataAccessException ex) {
-            throw translate(queue, ex);
-        }
+        return onQueue(queue, () -> this.jdbcTemplate.query(sql, FIRST_COLUMN, args));
     }
 
     // ---------------------------------------------------------------------
@@ -641,27 +653,14 @@ public class PgmqTemplate implements PgmqOperations {
         String conditional = options.getConditional() != null
                 ? this.payloadConverter.toJson(options.getConditional())
                 : "{}";
-        try {
-            if (options.isLongPolling()) {
-                Duration longPoll = options.getLongPoll();
-                Duration interval = options.getPollInterval();
-                return convertAll(queue, payloadType, this.jdbcTemplate.query(
-                        SQL_READ_WITH_POLL,
-                        rawMapper(queue),
-                        queue,
-                        visibilitySeconds,
-                        options.getBatchSize(),
-                        longPoll != null ? seconds(longPoll) : 0,
-                        pollIntervalMillis(interval),
-                        conditional));
-            }
-            return convertAll(queue, payloadType, this.jdbcTemplate.query(
-                    SQL_READ, rawMapper(queue), queue, visibilitySeconds,
-                    options.getBatchSize(), conditional));
-        }
-        catch (DataAccessException ex) {
-            throw translate(queue, ex);
-        }
+        Duration longPoll = options.getLongPoll();
+        List<PgmqMessage<String>> raw = onQueue(queue, () -> longPoll != null
+                ? this.jdbcTemplate.query(SQL_READ_WITH_POLL, rawMapper(queue), queue, visibilitySeconds,
+                        options.getBatchSize(), seconds(longPoll), pollIntervalMillis(options.getPollInterval()),
+                        conditional)
+                : this.jdbcTemplate.query(SQL_READ, rawMapper(queue), queue, visibilitySeconds,
+                        options.getBatchSize(), conditional));
+        return convertAll(payloadType, raw);
     }
 
     @Override
@@ -680,25 +679,13 @@ public class PgmqTemplate implements PgmqOperations {
         requireGroupedReads();
         int visibilitySeconds = seconds(options.getVisibilityTimeout());
         Duration longPoll = options.getLongPoll();
-        try {
-            if (longPoll != null) {
-                Duration interval = options.getPollInterval();
-                return convertAll(queue, payloadType, this.jdbcTemplate.query(
-                        pollingStatementFor(options.getGroupStrategy()),
-                        rawMapper(queue),
-                        queue,
-                        visibilitySeconds,
-                        options.getBatchSize(),
-                        seconds(longPoll),
-                        pollIntervalMillis(interval)));
-            }
-            return convertAll(queue, payloadType, this.jdbcTemplate.query(
-                    statementFor(options.getGroupStrategy()), rawMapper(queue),
-                    queue, visibilitySeconds, options.getBatchSize()));
-        }
-        catch (DataAccessException ex) {
-            throw translate(queue, ex);
-        }
+        List<PgmqMessage<String>> raw = onQueue(queue, () -> longPoll != null
+                ? this.jdbcTemplate.query(pollingStatementFor(options.getGroupStrategy()), rawMapper(queue), queue,
+                        visibilitySeconds, options.getBatchSize(), seconds(longPoll),
+                        pollIntervalMillis(options.getPollInterval()))
+                : this.jdbcTemplate.query(statementFor(options.getGroupStrategy()), rawMapper(queue), queue,
+                        visibilitySeconds, options.getBatchSize()));
+        return convertAll(payloadType, raw);
     }
 
     private static String statementFor(GroupReadStrategy strategy) {
@@ -729,25 +716,28 @@ public class PgmqTemplate implements PgmqOperations {
         if (count < 1) {
             throw new IllegalArgumentException("count must be at least 1, but was " + count);
         }
-        try {
-            if (capabilities().popWithQuantity()) {
-                return convertAll(queue, payloadType,
-                        this.jdbcTemplate.query(SQL_POP_WITH_QTY, rawMapper(queue), queue, count));
-            }
-            // PGMQ before 1.7 pops exactly one message per call.
+        if (capabilities().popWithQuantity()) {
+            return convertAll(payloadType,
+                    onQueue(queue, () -> this.jdbcTemplate.query(SQL_POP_WITH_QTY, rawMapper(queue), queue, count)));
+        }
+        if (count == 1) {
+            return convertAll(payloadType,
+                    onQueue(queue, () -> this.jdbcTemplate.query(SQL_POP, rawMapper(queue), queue)));
+        }
+        // PGMQ before 1.7 pops one message per call. One transaction keeps the pops all-or-nothing, as a
+        // single pop with a quantity is: a failure part-way must not lose the messages already popped.
+        return convertAll(payloadType, inOneTransaction(() -> {
             List<PgmqMessage<String>> popped = new ArrayList<>();
             for (int i = 0; i < count; i++) {
-                List<PgmqMessage<String>> one = this.jdbcTemplate.query(SQL_POP, rawMapper(queue), queue);
+                List<PgmqMessage<String>> one = onQueue(queue,
+                        () -> this.jdbcTemplate.query(SQL_POP, rawMapper(queue), queue));
                 if (one.isEmpty()) {
                     break;
                 }
                 popped.addAll(one);
             }
-            return convertAll(queue, payloadType, popped);
-        }
-        catch (DataAccessException ex) {
-            throw translate(queue, ex);
-        }
+            return popped;
+        }));
     }
 
     // ---------------------------------------------------------------------
@@ -779,13 +769,7 @@ public class PgmqTemplate implements PgmqOperations {
     @Override
     public void setVisibilityTimeout(String queue, long messageId, Duration timeout) {
         QueueNames.validate(queue);
-        int seconds = seconds(timeout);
-        try {
-            this.jdbcTemplate.query(SQL_SET_VT_ONE, (rs, rowNum) -> rs.getLong(1), queue, messageId, seconds);
-        }
-        catch (DataAccessException ex) {
-            throw translate(queue, ex);
-        }
+        queryIds(queue, SQL_SET_VT_ONE, queue, messageId, seconds(timeout));
     }
 
     @Override
@@ -801,13 +785,7 @@ public class PgmqTemplate implements PgmqOperations {
             }
             return;
         }
-        try {
-            this.jdbcTemplate.query(
-                    SQL_SET_VT_MANY, (rs, rowNum) -> rs.getLong(1), queue, idArray(messageIds), seconds);
-        }
-        catch (DataAccessException ex) {
-            throw translate(queue, ex);
-        }
+        queryIds(queue, SQL_SET_VT_MANY, queue, idArray(messageIds), seconds);
     }
 
     @Override
@@ -815,13 +793,7 @@ public class PgmqTemplate implements PgmqOperations {
         QueueNames.validate(queue);
         Assert.notNull(visibleAt, "visibleAt must not be null");
         String sql = capabilities().setVisibleAt() ? SQL_SET_VT_ONE_AT : SQL_SET_VT_ONE_AT_FALLBACK;
-        try {
-            this.jdbcTemplate.query(sql, (rs, rowNum) -> rs.getLong(1),
-                    queue, messageId, timestamptz(visibleAt));
-        }
-        catch (DataAccessException ex) {
-            throw translate(queue, ex);
-        }
+        queryIds(queue, sql, queue, messageId, timestamptz(visibleAt));
     }
 
     @Override
@@ -837,13 +809,7 @@ public class PgmqTemplate implements PgmqOperations {
             }
             return;
         }
-        try {
-            this.jdbcTemplate.query(SQL_SET_VT_MANY_AT, (rs, rowNum) -> rs.getLong(1),
-                    queue, idArray(messageIds), timestamptz(visibleAt));
-        }
-        catch (DataAccessException ex) {
-            throw translate(queue, ex);
-        }
+        queryIds(queue, SQL_SET_VT_MANY_AT, queue, idArray(messageIds), timestamptz(visibleAt));
     }
 
     @Override
@@ -851,12 +817,7 @@ public class PgmqTemplate implements PgmqOperations {
         QueueNames.validate(queue);
         String sql = "update " + queueTable(queue) + " set read_ct = read_ct + 1, "
                 + "vt = clock_timestamp() + ?::integer * interval '1 second' where msg_id = ?::bigint";
-        try {
-            this.jdbcTemplate.update(sql, seconds(delay), messageId);
-        }
-        catch (DataAccessException ex) {
-            throw translate(queue, ex);
-        }
+        onQueue(queue, () -> this.jdbcTemplate.update(sql, seconds(delay), messageId));
     }
 
     /** The queue's own table as a quoted identifier, named the way {@code pgmq.format_table_name} does. */
@@ -871,16 +832,21 @@ public class PgmqTemplate implements PgmqOperations {
     @Override
     public PgmqCapabilities capabilities() {
         PgmqCapabilities current = this.capabilities;
-        if (current == null) {
-            synchronized (this) {
-                current = this.capabilities;
-                if (current == null) {
-                    current = detectCapabilities();
-                    this.capabilities = current;
-                }
-            }
+        if (current != null) {
+            return current;
         }
-        return current;
+        this.capabilitiesLock.lock();
+        try {
+            current = this.capabilities;
+            if (current == null) {
+                current = detectCapabilities();
+                this.capabilities = current;
+            }
+            return current;
+        }
+        finally {
+            this.capabilitiesLock.unlock();
+        }
     }
 
     /**
@@ -962,7 +928,7 @@ public class PgmqTemplate implements PgmqOperations {
             this.clientListener.onSent(queue, ids, Duration.ofNanos(System.nanoTime() - startedAtNanos));
         }
         catch (RuntimeException ex) {
-            LOGGER.warn("A PgmqClientListener callback failed for queue '" + queue + "'", ex);
+            logger.warn("A PgmqClientListener callback failed for queue '" + queue + "'", ex);
         }
     }
 
@@ -971,11 +937,30 @@ public class PgmqTemplate implements PgmqOperations {
         if (messageIds.isEmpty()) {
             return List.of();
         }
+        return queryIds(queue, sql, queue, idArray(messageIds));
+    }
+
+    private List<Long> queryIds(String queue, String sql, Object... args) {
+        return onQueue(queue, () -> this.jdbcTemplate.query(sql, FIRST_COLUMN, args));
+    }
+
+    /** Runs statements against {@code queue}, translating Postgres errors into the library's exceptions. */
+    private <T> T onQueue(String queue, Supplier<T> statements) {
         try {
-            return this.jdbcTemplate.query(sql, (rs, rowNum) -> rs.getLong(1), queue, idArray(messageIds));
+            return statements.get();
         }
         catch (DataAccessException ex) {
             throw translate(queue, ex);
+        }
+    }
+
+    /** As {@link #onQueue}, for a PGMQ function that concerns no single queue. */
+    private <T> T withoutQueue(String function, Supplier<T> statements) {
+        try {
+            return statements.get();
+        }
+        catch (DataAccessException ex) {
+            throw new PgmqException("pgmq." + function + "() failed: " + ex.getMostSpecificCause().getMessage(), ex);
         }
     }
 
@@ -989,8 +974,9 @@ public class PgmqTemplate implements PgmqOperations {
      * the offending message to count it towards its attempt limit.
      */
     private RowMapper<PgmqMessage<String>> rawMapper(String queue) {
+        ColumnNames columnNames = new ColumnNames();
         return (rs, rowNum) -> {
-            Set<String> columns = columnNames(rs);
+            Set<String> columns = columnNames.of(rs);
             String raw = rs.getString("message");
             long id = rs.getLong("msg_id");
             String headerJson = columns.contains("headers") ? rs.getString("headers") : null;
@@ -1008,7 +994,7 @@ public class PgmqTemplate implements PgmqOperations {
     }
 
     @SuppressWarnings("unchecked")
-    private <T> List<PgmqMessage<T>> convertAll(String queue, Class<T> payloadType, List<PgmqMessage<String>> raw) {
+    private <T> List<PgmqMessage<T>> convertAll(Class<T> payloadType, List<PgmqMessage<String>> raw) {
         if (payloadType == String.class) {
             return (List<PgmqMessage<T>>) (List<?>) raw;
         }
@@ -1025,17 +1011,23 @@ public class PgmqTemplate implements PgmqOperations {
         if (payloadType == String.class) {
             return (PgmqMessage<T>) message.withPayload(message.rawPayload());
         }
+        T payload;
         try {
-            T payload = this.payloadConverter.fromJson(message.rawPayload(), payloadType);
-            if (payload == null) {
-                throw new PayloadConversionException("the payload is JSON null", null);
-            }
-            return message.withPayload(payload);
+            payload = this.payloadConverter.fromJson(message.rawPayload(), payloadType);
         }
         catch (RuntimeException ex) {
-            throw new PayloadConversionException("Message " + message.id() + " on queue '" + message.queueName()
-                    + "' could not be converted to " + payloadType.getName() + ": " + ex.getMessage(), ex);
+            throw new PayloadConversionException(conversionFailure(message, payloadType) + ": " + ex.getMessage(), ex);
         }
+        if (payload == null) {
+            throw new PayloadConversionException(conversionFailure(message, payloadType) + ": the payload is JSON null",
+                    null);
+        }
+        return message.withPayload(payload);
+    }
+
+    private static String conversionFailure(PgmqMessage<?> message, Class<?> payloadType) {
+        return "Message " + message.id() + " on queue '" + message.queueName() + "' could not be converted to "
+                + payloadType.getName();
     }
 
     /**
@@ -1056,7 +1048,7 @@ public class PgmqTemplate implements PgmqOperations {
         catch (RuntimeException ex) {
             // Log the shape, not the content: headers may carry data that does not belong in logs,
             // and a producer controls their size.
-            LOGGER.warn("Ignoring headers of message " + id + " on queue '" + queue + "': they are not a JSON "
+            logger.warn("Ignoring headers of message " + id + " on queue '" + queue + "': they are not a JSON "
                     + "object (" + headerJson.length() + " characters, starting '"
                     + headerJson.substring(0, Math.min(16, headerJson.length())) + "')");
             return null;
@@ -1100,7 +1092,7 @@ public class PgmqTemplate implements PgmqOperations {
     }
 
     private static int pollIntervalMillis(@Nullable Duration interval) {
-        long millis = interval != null ? interval.toMillis() : 100;
+        long millis = interval != null ? interval.toMillis() : DEFAULT_POLL_INTERVAL_MILLIS;
         return (int) Math.max(1, Math.min(Integer.MAX_VALUE, millis));
     }
 
@@ -1162,12 +1154,7 @@ public class PgmqTemplate implements PgmqOperations {
     }
 
     private void execute(String queue, String sql, Object... args) {
-        try {
-            this.jdbcTemplate.query(sql, (rs) -> null, args);
-        }
-        catch (DataAccessException ex) {
-            throw translate(queue, ex);
-        }
+        onQueue(queue, () -> this.jdbcTemplate.query(sql, (rs) -> null, args));
     }
 
     private <T> @Nullable T queryOne(String queue, String sql, Class<T> type, Object... args) {
@@ -1212,7 +1199,7 @@ public class PgmqTemplate implements PgmqOperations {
                     + message + ")", ex);
         }
         if (message != null) {
-            String lower = message.toLowerCase(java.util.Locale.ROOT);
+            String lower = message.toLowerCase(Locale.ROOT);
             if (lower.contains("does not exist") && namesQueueTable(message, queue)) {
                 return new QueueNotFoundException(queue, ex);
             }
@@ -1225,7 +1212,7 @@ public class PgmqTemplate implements PgmqOperations {
 
     /** Whether a Postgres error message refers to the queue's own table, {@code pgmq.q_<queue>}. */
     private static boolean namesQueueTable(String message, String queue) {
-        String lower = message.toLowerCase(java.util.Locale.ROOT);
+        String lower = message.toLowerCase(Locale.ROOT);
         String table = "q_" + QueueNames.normalize(queue);
         return lower.contains("." + table + "\"") || lower.contains("\"" + table + "\"");
     }
@@ -1239,11 +1226,29 @@ public class PgmqTemplate implements PgmqOperations {
         return null;
     }
 
+    /**
+     * The column names of one result set, read once: {@code pgmq.message_record} and
+     * {@code pgmq.metrics()} gain columns across versions, so a mapper checks which are present.
+     */
+    private static final class ColumnNames {
+
+        private @Nullable Set<String> names;
+
+        Set<String> of(ResultSet rs) throws SQLException {
+            Set<String> current = this.names;
+            if (current == null) {
+                current = columnNames(rs);
+                this.names = current;
+            }
+            return current;
+        }
+    }
+
     private static Set<String> columnNames(ResultSet rs) throws SQLException {
         ResultSetMetaData metaData = rs.getMetaData();
         Set<String> names = new LinkedHashSet<>();
         for (int i = 1; i <= metaData.getColumnCount(); i++) {
-            names.add(metaData.getColumnLabel(i).toLowerCase(java.util.Locale.ROOT));
+            names.add(metaData.getColumnLabel(i).toLowerCase(Locale.ROOT));
         }
         return names;
     }

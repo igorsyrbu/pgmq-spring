@@ -320,14 +320,21 @@ pgmq:
 
 | Group | Properties |
 |---|---|
-| General | `pgmq.enabled`, `pgmq.datasource`, `pgmq.verify-on-startup`, `pgmq.minimum-version` |
-| Queues | `pgmq.queues[].name`, `.kind`, `.partition-interval`, `.retention-interval`, `.fifo-index` |
-| Consumer | `pgmq.consumer.concurrency`, `batch-size`, `visibility-timeout`, `poll-delay`, `max-poll-delay`, `long-poll`, `acknowledge-mode`, `failure-action`, `retry-delay`, `max-attempts`, `dead-letter-queue`, `transactional`, `extend-lease`, `shutdown-timeout`, `group-ordered`, `group-strategy` |
+| General | `pgmq.enabled`, `pgmq.datasource`, `pgmq.create-extension`, `pgmq.verify-on-startup`, `pgmq.minimum-version` |
+| Queues | `pgmq.queues[].name`, `.kind`, `.partition-interval`, `.retention-interval`, `.fifo-index`, `.notify-on-insert`, `.notify-throttle` |
+| Producer | `pgmq.producer.default-headers`, `pgmq.producer.max-batch-size` |
+| Consumer | `pgmq.consumer.concurrency`, `batch-size`, `visibility-timeout`, `poll-delay`, `max-poll-delay`, `poll-jitter`, `long-poll`, `wake-up`, `consume-mode`, `acknowledge-mode`, `failure-action`, `retry-delay`, `retry-multiplier`, `max-retry-delay`, `max-attempts`, `non-retryable-exceptions`, `dead-letter-queue`, `transactional`, `transaction-timeout`, `extend-lease`, `batch-acknowledgements`, `ack-batch-size`, `shutdown-timeout`, `group-ordered`, `group-strategy` |
+| Declared consumers | `pgmq.consumers.<name>.handler`, `.queue`, `.payload-type`, `.transaction-manager`, `.auto-startup`, plus any `pgmq.consumer.*` property to override |
 | Health | `pgmq.health.enabled`, `pgmq.health.queues`, `pgmq.health.max-queue-depth` |
-| Metrics | `pgmq.metrics.enabled`, `pgmq.metrics.queues` |
+| Metrics | `pgmq.metrics.enabled`, `pgmq.metrics.queues`, `pgmq.metrics.refresh-interval`, `pgmq.metrics.refresh-intervals` |
 
-`pgmq.consumer.*` only sets defaults: containers are built by your code, from the `ConsumerOptions`
-bean — see [how consumer properties reach a container](docs/CONFIGURATION.md#how-consumer-properties-reach-a-container).
+Containers come from two places, and `pgmq.consumer.*` feeds both. Declare one in your own code
+from the `ConsumerOptions` bean, which holds the `pgmq.consumer.*` defaults - see
+[how consumer properties reach a container](docs/CONFIGURATION.md#how-consumer-properties-reach-a-container).
+Or declare it under `pgmq.consumers.<name>`: the starter then builds a container bean named
+`pgmqConsumer-<name>` around a handler bean you name, inheriting `pgmq.consumer.*` and overriding
+whatever the entry sets, with no container code (see
+[`sample-quickstart-declarative`](samples/sample-quickstart-declarative)).
 Invalid values fail at startup with a message naming the property.
 
 ## Observability
@@ -373,7 +380,8 @@ PGMQ's SQL surface differs across the supported range:
   capability-gated: against an older PGMQ they raise a clear error naming the required version
   rather than failing obscurely.
 
-Capabilities are probed from the catalog on startup rather than parsed from a version string,
+Capabilities are probed from the catalog on first use (and at startup when `verify-on-startup` is
+on) rather than parsed from a version string,
 because a SQL-only PGMQ installation has no `pg_extension` row to read a version from.
 
 ## Documentation
@@ -402,7 +410,6 @@ Three runnable applications, each with integration tests against a real PGMQ con
 
 # consumers declared in configuration
 ./gradlew :samples:sample-quickstart-declarative:run
-
 ```
 
 ## Building

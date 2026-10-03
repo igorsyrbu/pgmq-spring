@@ -28,19 +28,18 @@ package io.github.pgmqspring.core.convert;
  *
  * <h2>The {@code String} contract</h2>
  *
- * <p>Implementations <strong>must</strong> treat {@link String} (and {@link CharSequence}) as
- * <em>already-encoded JSON</em> in both directions:
+ * <p>The two directions treat {@link String} differently, on purpose:
  *
  * <ul>
- *   <li>{@link #fromJson(String, Class)} with {@code String.class} returns the stored JSON text
- *       verbatim, rather than requiring the payload to be a JSON string literal.
- *   <li>{@link #toJson(Object)} is never called for pre-serialized sends; callers use
- *       {@code sendRaw} instead, so a JSON document is stored once rather than being escaped into
- *       a JSON string.
+ *   <li>{@link #fromJson(String, Class)} with {@code String.class} (or {@code CharSequence.class})
+ *       <strong>must</strong> return the stored JSON text verbatim, rather than requiring the
+ *       payload to be a JSON string literal. That is what lets
+ *       {@code read(queue, opts, String.class)} hand back the raw document for pass-through
+ *       scenarios such as relaying or auditing.
+ *   <li>{@link #toJson(Object)} serializes a {@code String} like any other value, as a JSON string
+ *       literal. To store a document that is already JSON, callers use {@code sendRaw}, which
+ *       bypasses the converter.
  * </ul>
- *
- * <p>That asymmetry is deliberate: it is what lets {@code read(queue, opts, String.class)} hand
- * back the raw document for pass-through scenarios such as relaying or auditing.
  */
 public interface PayloadConverter {
 

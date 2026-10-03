@@ -29,6 +29,7 @@ import io.github.pgmqspring.core.PgmqContainerSupport;
 import io.github.pgmqspring.core.PgmqMessage;
 import io.github.pgmqspring.core.convert.JacksonPayloadConverter;
 
+import static io.github.pgmqspring.core.PgmqContainerSupport.newQueue;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatNullPointerException;
 
@@ -41,12 +42,6 @@ class DefaultHeadersIntegrationTests {
     void setUp() {
         this.pgmq = new PgmqTemplate(PgmqContainerSupport.dataSource(), new JacksonPayloadConverter());
         this.pgmq.setDefaultHeaders(Map.of("source", "order-service", "schema", "v2"));
-    }
-
-    private String newQueue(String prefix) {
-        String queue = PgmqContainerSupport.uniqueQueueName(prefix);
-        this.pgmq.createQueue(queue);
-        return queue;
     }
 
     private List<Map<String, Object>> headersOf(String queue) {
