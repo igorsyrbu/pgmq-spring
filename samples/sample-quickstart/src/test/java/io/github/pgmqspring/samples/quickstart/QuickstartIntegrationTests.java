@@ -71,6 +71,13 @@ class QuickstartIntegrationTests {
                 .single() == 1;
     }
 
+    private boolean notified(String orderId) {
+        return this.jdbc.sql("select count(*) from order_notifications where order_id = ?")
+                .param(orderId)
+                .query(Integer.class)
+                .single() == 1;
+    }
+
     @Test
     void anOrderIsPublishedAndConsumed() {
         this.orderService.placeOrder("order-1", "alice", 2500);
@@ -78,6 +85,24 @@ class QuickstartIntegrationTests {
         await().atMost(Duration.ofSeconds(30)).until(() -> confirmed("order-1"));
 
         assertThat(this.pgmq.metrics(OrderService.QUEUE).queueLength()).isZero();
+    }
+
+    @Test
+    void confirmedOrdersAreNotifiedByAConsumerThatAcknowledgesInBatches() {
+        PgmqMessageListenerContainer<?> notifications =
+                this.applicationContext.getBean("notificationListenerContainer", PgmqMessageListenerContainer.class);
+        assertThat(notifications.getOptions().isBatchAcknowledgements()).isTrue();
+
+        for (int i = 0; i < 5; i++) {
+            this.orderService.placeOrder("notify-" + i, "customer-" + i, 100);
+        }
+
+        await().atMost(Duration.ofSeconds(45)).until(() -> this.jdbc
+                .sql("select count(*) from order_notifications where order_id like 'notify-%'")
+                .query(Integer.class).single() == 5);
+        await().atMost(Duration.ofSeconds(10))
+                .until(() -> this.pgmq.metrics(NotificationHandler.QUEUE).queueLength() == 0);
+        assertThat(notified("bad-order")).isFalse();
     }
 
     @Test
@@ -124,7 +149,7 @@ class QuickstartIntegrationTests {
     void theListenerContainerIsAutoStartedAndCanBePaused() {
         @SuppressWarnings("unchecked")
         PgmqMessageListenerContainer<OrderPlaced> container =
-                this.applicationContext.getBean(PgmqMessageListenerContainer.class);
+                this.applicationContext.getBean("orderListenerContainer", PgmqMessageListenerContainer.class);
 
         assertThat(container.isRunning()).isTrue();
         assertThat(container.isPaused()).isFalse();

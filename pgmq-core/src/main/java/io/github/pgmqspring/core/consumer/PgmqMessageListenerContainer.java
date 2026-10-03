@@ -547,18 +547,28 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
             dispatchBatch(batch, lease);
             return;
         }
-        for (int i = 0; i < batch.size(); i++) {
-            if (!this.running.get()) {
-                // Shutting down: hand back the messages we have not started rather than beginning
-                // work we may not be able to finish.
-                release(batch.subList(i, batch.size()), lease);
-                return;
+        PendingAcknowledgements pending = this.options.isBatchAcknowledgements()
+                ? new PendingAcknowledgements(lease)
+                : null;
+        try {
+            for (int i = 0; i < batch.size(); i++) {
+                if (!this.running.get()) {
+                    // Shutting down: hand back the messages we have not started rather than beginning
+                    // work we may not be able to finish.
+                    release(batch.subList(i, batch.size()), lease);
+                    return;
+                }
+                dispatchSingle(batch.get(i), lease, pending);
             }
-            dispatchSingle(batch.get(i), lease);
+        }
+        finally {
+            if (pending != null) {
+                pending.flush();
+            }
         }
     }
 
-    private void dispatchSingle(PgmqMessage<String> raw, Lease lease) {
+    private void dispatchSingle(PgmqMessage<String> raw, Lease lease, @Nullable PendingAcknowledgements pending) {
         withMdc(raw, () -> {
             if (isPoison(raw)) {
                 handlePoison(raw, lease);
@@ -578,12 +588,12 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
                 if (this.options.isTransactional()) {
                     requireTransactionTemplate().executeWithoutResult((status) -> {
                         invokeHandler(message, acknowledgement);
-                        applyAcknowledgeMode(message, acknowledgement, lease);
+                        applyAcknowledgeMode(message, acknowledgement, lease, pending);
                     });
                 }
                 else {
                     invokeHandler(message, acknowledgement);
-                    applyAcknowledgeMode(message, acknowledgement, lease);
+                    applyAcknowledgeMode(message, acknowledgement, lease, pending);
                 }
                 Duration took = Duration.between(startedAt, Instant.now());
                 safely(() -> this.listener.onSuccess(this.queue, message, took));
@@ -742,8 +752,13 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
         }
     }
 
-    private void applyAcknowledgeMode(PgmqMessage<T> message, DefaultAcknowledgement acknowledgement, Lease lease) {
+    private void applyAcknowledgeMode(PgmqMessage<T> message, DefaultAcknowledgement acknowledgement, Lease lease,
+            @Nullable PendingAcknowledgements pending) {
         if (this.options.getAcknowledgeMode() == AcknowledgeMode.MANUAL || acknowledgement.isAcknowledged()) {
+            return;
+        }
+        if (pending != null) {
+            pending.add(message.id());
             return;
         }
         lease.settle(message.id());
@@ -1038,6 +1053,61 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
             }
             finally {
                 this.lock.unlock();
+            }
+        }
+    }
+
+    /**
+     * Acknowledgements of one polled batch that have not been sent yet, with
+     * {@link ConsumerOptions.Builder#batchAcknowledgements(boolean)}. Used by a single polling loop
+     * only, so it needs no synchronization.
+     */
+    private final class PendingAcknowledgements {
+
+        private final Lease lease;
+
+        private final int flushThreshold;
+
+        private final List<Long> ids = new ArrayList<>();
+
+        private PendingAcknowledgements(Lease lease) {
+            this.lease = lease;
+            Integer ackBatchSize = PgmqMessageListenerContainer.this.options.getAckBatchSize();
+            this.flushThreshold = ackBatchSize != null
+                    ? ackBatchSize
+                    : PgmqMessageListenerContainer.this.options.getBatchSize();
+        }
+
+        void add(long id) {
+            this.ids.add(id);
+            if (this.ids.size() >= this.flushThreshold) {
+                flush();
+            }
+        }
+
+        /** Never throws: a failed flush leaves the messages leased, and they are redelivered. */
+        void flush() {
+            if (this.ids.isEmpty()) {
+                return;
+            }
+            List<Long> flushing = List.copyOf(this.ids);
+            this.ids.clear();
+            // Settled only now, not when each handler returned: until its delete is sent a message
+            // must stay covered by the lease, or it could lapse and reach another consumer first.
+            flushing.forEach(this.lease::settle);
+            PgmqOperations pgmq = PgmqMessageListenerContainer.this.pgmq;
+            String queue = PgmqMessageListenerContainer.this.queue;
+            try {
+                switch (PgmqMessageListenerContainer.this.options.getAcknowledgeMode()) {
+                    case DELETE -> pgmq.delete(queue, flushing);
+                    case ARCHIVE -> pgmq.archive(queue, flushing);
+                    case MANUAL -> {
+                    }
+                }
+            }
+            catch (Throwable ex) {
+                logger.warn("Could not acknowledge " + flushing.size() + " handled message(s) on queue '" + queue
+                        + "'; they will be redelivered once their visibility timeout expires", ex);
             }
         }
     }

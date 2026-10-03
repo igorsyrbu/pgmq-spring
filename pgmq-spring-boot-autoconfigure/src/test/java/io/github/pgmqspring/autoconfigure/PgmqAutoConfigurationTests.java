@@ -133,6 +133,30 @@ class PgmqAutoConfigurationTests {
     }
 
     @Test
+    void bindsBatchAcknowledgementProperties() {
+        this.runner.withPropertyValues(
+                "pgmq.consumer.batch-acknowledgements=true",
+                "pgmq.consumer.ack-batch-size=50").run((context) -> {
+                    ConsumerOptions options = context.getBean(ConsumerOptions.class);
+                    assertThat(options.isBatchAcknowledgements()).isTrue();
+                    assertThat(options.getAckBatchSize()).isEqualTo(50);
+                });
+        this.runner.run((context) -> {
+            ConsumerOptions options = context.getBean(ConsumerOptions.class);
+            assertThat(options.isBatchAcknowledgements()).isFalse();
+            assertThat(options.getAckBatchSize()).isNull();
+        });
+    }
+
+    @Test
+    void rejectsBatchAcknowledgementsWithTransactionalAtStartup() {
+        this.runner.withPropertyValues(
+                "pgmq.consumer.batch-acknowledgements=true",
+                "pgmq.consumer.transactional=true").run((context) -> assertThat(context).hasFailed()
+                        .getFailure().rootCause().hasMessageContaining("batchAcknowledgements"));
+    }
+
+    @Test
     void createsConfiguredQueuesOnStartup() {
         String queue = PgmqContainerSupport.uniqueQueueName("autoconf");
         String unlogged = PgmqContainerSupport.uniqueQueueName("autoconf_unlogged");

@@ -30,7 +30,8 @@ import io.github.pgmqspring.core.consumer.FailureAction;
 import io.github.pgmqspring.core.consumer.PgmqMessageListenerContainer;
 
 /**
- * Declares the listener container.
+ * Declares the listener containers: a transactional one for orders, and one for notifications
+ * that acknowledges in batches.
  *
  * <p>It is a {@code SmartLifecycle}, so declaring it as a bean is all that is needed — it starts
  * and stops with the application context, and shuts down gracefully by draining in-flight work
@@ -55,6 +56,20 @@ public class OrderConsumerConfiguration {
                         .deadLetterQueue("orders_dlq")
                         .build())
                 .transactionManager(transactionManager)
+                .handler(handler::handle)
+                .build();
+    }
+
+    /**
+     * Built from the {@code pgmq.consumer.*} defaults in {@code application.yaml}, which turn on
+     * batch acknowledgements; only the queue and handler are set here.
+     */
+    @Bean
+    PgmqMessageListenerContainer<OrderConfirmed> notificationListenerContainer(PgmqOperations pgmq,
+            ConsumerOptions defaults, NotificationHandler handler) {
+
+        return PgmqMessageListenerContainer.builder(pgmq, NotificationHandler.QUEUE, OrderConfirmed.class)
+                .options(defaults)
                 .handler(handler::handle)
                 .build();
     }

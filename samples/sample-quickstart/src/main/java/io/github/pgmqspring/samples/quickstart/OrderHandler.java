@@ -24,6 +24,7 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Component;
 
 import io.github.pgmqspring.core.PgmqMessage;
+import io.github.pgmqspring.core.client.PgmqOperations;
 
 /**
  * The consuming side.
@@ -39,8 +40,11 @@ public class OrderHandler {
 
     private final JdbcClient jdbc;
 
-    public OrderHandler(JdbcClient jdbc) {
+    private final PgmqOperations pgmq;
+
+    public OrderHandler(JdbcClient jdbc, PgmqOperations pgmq) {
         this.jdbc = jdbc;
+        this.pgmq = pgmq;
     }
 
     /** Handles one order event. Throwing signals failure and triggers the configured retry. */
@@ -53,9 +57,15 @@ public class OrderHandler {
             throw new IllegalArgumentException("order " + event.orderId() + " has a negative total");
         }
 
-        this.jdbc.sql("insert into order_confirmations(order_id, confirmed_at) values (?, now()) "
+        int confirmed = this.jdbc.sql("insert into order_confirmations(order_id, confirmed_at) values (?, now()) "
                         + "on conflict (order_id) do nothing")
                 .param(event.orderId())
                 .update();
+
+        // Runs in the container's transaction, so the event is published exactly when the
+        // confirmation commits - and a repeat delivery, which confirms nothing, publishes nothing.
+        if (confirmed == 1) {
+            this.pgmq.send(NotificationHandler.QUEUE, new OrderConfirmed(event.orderId(), event.customer()));
+        }
     }
 }

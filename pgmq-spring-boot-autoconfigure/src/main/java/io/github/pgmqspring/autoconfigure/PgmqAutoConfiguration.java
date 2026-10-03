@@ -97,6 +97,8 @@ public class PgmqAutoConfiguration {
                 .deadLetterQueue(consumer.getDeadLetterQueue())
                 .transactional(consumer.isTransactional())
                 .extendLease(consumer.isExtendLease())
+                .batchAcknowledgements(consumer.isBatchAcknowledgements())
+                .ackBatchSize(consumer.getAckBatchSize())
                 .shutdownTimeout(consumer.getShutdownTimeout())
                 .build();
     }

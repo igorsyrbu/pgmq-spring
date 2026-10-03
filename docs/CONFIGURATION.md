@@ -93,12 +93,15 @@ builds one - see [how they reach a container](#how-consumer-properties-reach-a-c
 | `dead-letter-queue` | string | *unset* | Target for `failure-action=dead-letter` (required then). Must exist when the container starts, and must not be the consumed queue. |
 | `transactional` | boolean | `false` | Run the handler and its acknowledgement in one transaction, so business writes and the ack commit or roll back together. Needs a `PlatformTransactionManager` on the same `DataSource`. |
 | `extend-lease` | boolean | `false` | Keep extending the lease of every message in a polled batch until it is settled - including messages waiting their turn and those of a batch handler. Refreshed every third of `visibility-timeout`, but never more often than every 200 ms. |
+| `batch-acknowledgements` | boolean | `false` | Acknowledge the messages of a polled batch with one `delete` (or `archive`) statement when the batch is done, instead of one statement per message: a batch of 10 costs 2 round trips instead of 11. Applies to single-message handlers; a batch handler is always acknowledged with one statement. Until the flush each message stays leased - with `extend-lease`, its lease keeps being refreshed - so a crash or a failed flush redelivers it. Handler-initiated settlements (`Acknowledgement` calls) are still sent at once. Cannot be combined with `transactional` or `acknowledge-mode=manual`. |
+| `ack-batch-size` | int | *unset* | With `batch-acknowledgements`, flush as soon as this many acknowledgements are pending instead of once per polled batch. Unset flushes once per batch; a value of at least `batch-size` has no effect. At least 1 when set. |
 | `shutdown-timeout` | duration | `30s` | How long stopping waits for running handlers before interrupting them; their messages are redelivered once the lease lapses. Containers drain in parallel. Keep it below `spring.lifecycle.timeout-per-shutdown-phase` (30s by default in Boot). Must not be negative. |
 | `group-ordered` | boolean | `false` | Read with PGMQ's grouped reads: per `x-pgmq-group` value, at most one message is in flight across all consumers and messages arrive in send order. Messages without the header share one implicit group. Requires PGMQ 1.10.0; pair with `pgmq.queues[].fifo-index`. |
 | `group-strategy` | enum | `head` | How a grouped read fills a batch. `head` - at most one message per group, so a batch never holds two from one key (the only strategy where per-key order survives any handler). `greedy` - fills from the oldest group first. `round-robin` - interleaves groups so one busy key cannot monopolise a batch. Ignored unless `group-ordered`. |
 
 Invalid combinations fail at startup with a message naming the property, for example
-`failure-action=dead-letter` without `dead-letter-queue`, `poll-delay: 0`, or `long-poll: 500ms`.
+`failure-action=dead-letter` without `dead-letter-queue`, `poll-delay: 0`, `long-poll: 500ms`, or
+`batch-acknowledgements` together with `transactional`.
 
 ### Health (`pgmq.health.*`)
 

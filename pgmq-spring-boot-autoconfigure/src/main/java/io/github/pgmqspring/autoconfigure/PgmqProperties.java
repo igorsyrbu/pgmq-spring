@@ -293,6 +293,20 @@ public class PgmqProperties {
         private boolean extendLease;
 
         /**
+         * Whether to acknowledge the messages of a polled batch with one statement when the batch
+         * is done, instead of one statement per message. Applies to single-message handlers; until
+         * the flush each message stays leased, so a crash redelivers it. Cannot be combined with
+         * transactional or acknowledge-mode=manual.
+         */
+        private boolean batchAcknowledgements;
+
+        /**
+         * With batch-acknowledgements, flush as soon as this many acknowledgements are pending
+         * rather than once per polled batch. Unset flushes once per batch. At least 1 when set.
+         */
+        private @Nullable Integer ackBatchSize;
+
+        /**
          * How long shutdown waits for in-flight handlers before interrupting them. Keep it below
          * spring.lifecycle.timeout-per-shutdown-phase. Must not be negative.
          */
@@ -416,6 +430,22 @@ public class PgmqProperties {
 
         public void setExtendLease(boolean extendLease) {
             this.extendLease = extendLease;
+        }
+
+        public boolean isBatchAcknowledgements() {
+            return this.batchAcknowledgements;
+        }
+
+        public void setBatchAcknowledgements(boolean batchAcknowledgements) {
+            this.batchAcknowledgements = batchAcknowledgements;
+        }
+
+        public @Nullable Integer getAckBatchSize() {
+            return this.ackBatchSize;
+        }
+
+        public void setAckBatchSize(@Nullable Integer ackBatchSize) {
+            this.ackBatchSize = ackBatchSize;
         }
 
         public Duration getShutdownTimeout() {

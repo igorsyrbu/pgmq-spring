@@ -9,6 +9,8 @@ consumes**. No HTTP layer, no chunking, no bookkeeping. Start here.
   back together — the transactional outbox with no outbox table.
 - Consuming with `PgmqMessageListenerContainer`, declared as an ordinary bean.
 - Transactional processing, retries, and dead-lettering after three failed attempts.
+- A second, non-transactional consumer configured entirely from `pgmq.consumer.*`, which
+  acknowledges each polled batch with one statement (`batch-acknowledgements`).
 - The health indicator and Micrometer metrics the starter contributes for free.
 
 ## Running it
@@ -24,12 +26,14 @@ docker run -d --name pgmq -e POSTGRES_PASSWORD=postgres -p 5432:5432 \
 The starter creates the `pgmq` extension in the `postgres` database on first start, so there is no
 manual `CREATE EXTENSION` step.
 
-On startup it places three orders. Two succeed; the third has a negative total, which the handler
-rejects, so it is retried and then dead-lettered. You should see the confirmations and then the
-dead-letter in the log.
+On startup it places three orders. Two succeed, and each confirmation publishes an
+`OrderConfirmed` event that the notification consumer records; the third has a negative total,
+which the handler rejects, so it is retried and then dead-lettered. You should see the
+confirmations, the notifications and then the dead-letter in the log.
 
 ```bash
 docker exec -it pgmq psql -U postgres -c 'select * from order_confirmations;'
+docker exec -it pgmq psql -U postgres -c 'select * from order_notifications;'
 docker exec -it pgmq psql -U postgres -c 'select msg_id, read_ct, message from pgmq.q_orders_dlq;'
 ```
 
@@ -40,9 +44,10 @@ Pass `--args='--sample.demo.enabled=false'` to start it without the demo orders.
 | File | What to look at |
 |---|---|
 | [`OrderService`](src/main/java/io/github/pgmqspring/samples/quickstart/OrderService.java) | `@Transactional` — the insert and the `send` are one Postgres transaction |
-| [`OrderHandler`](src/main/java/io/github/pgmqspring/samples/quickstart/OrderHandler.java) | An idempotent handler. At-least-once delivery makes this mandatory, not optional |
-| [`OrderConsumerConfiguration`](src/main/java/io/github/pgmqspring/samples/quickstart/OrderConsumerConfiguration.java) | The listener container and its options |
-| [`application.yaml`](src/main/resources/application.yaml) | The whole configuration: a datasource and two queue names |
+| [`OrderHandler`](src/main/java/io/github/pgmqspring/samples/quickstart/OrderHandler.java) | An idempotent handler. At-least-once delivery makes this mandatory, not optional. It publishes `OrderConfirmed` in its own transaction |
+| [`NotificationHandler`](src/main/java/io/github/pgmqspring/samples/quickstart/NotificationHandler.java) | A handler whose single idempotent write needs no transaction, so its acknowledgements can be batched |
+| [`OrderConsumerConfiguration`](src/main/java/io/github/pgmqspring/samples/quickstart/OrderConsumerConfiguration.java) | Both listener containers: one with options in code, one from `pgmq.consumer.*` |
+| [`application.yaml`](src/main/resources/application.yaml) | The whole configuration: a datasource, the queues and the consumer defaults |
 
 ## Tests
 
@@ -50,9 +55,9 @@ Pass `--args='--sample.demo.enabled=false'` to start it without the demo orders.
 ./gradlew :samples:sample-quickstart:test
 ```
 
-Six integration tests against a real PGMQ container: send/consume, bulk consumption, a rollback
-after the send leaving neither row nor message, dead-lettering, pause/resume, and the auto-configured health
-indicator and metrics.
+Seven integration tests against a real PGMQ container: send/consume, bulk consumption, the
+batch-acknowledging notification consumer, a rollback after the send leaving neither row nor
+message, dead-lettering, pause/resume, and the auto-configured health indicator and metrics.
 
 ## Next
 

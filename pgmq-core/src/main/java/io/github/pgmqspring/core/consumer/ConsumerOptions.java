@@ -62,6 +62,10 @@ public final class ConsumerOptions {
 
     private final boolean extendLease;
 
+    private final boolean batchAcknowledgements;
+
+    private final @Nullable Integer ackBatchSize;
+
     private final Duration shutdownTimeout;
 
     private ConsumerOptions(Builder builder) {
@@ -80,6 +84,8 @@ public final class ConsumerOptions {
         this.deadLetterQueue = builder.deadLetterQueue;
         this.transactional = builder.transactional;
         this.extendLease = builder.extendLease;
+        this.batchAcknowledgements = builder.batchAcknowledgements;
+        this.ackBatchSize = builder.ackBatchSize;
         this.shutdownTimeout = builder.shutdownTimeout;
     }
 
@@ -113,6 +119,8 @@ public final class ConsumerOptions {
         builder.deadLetterQueue = this.deadLetterQueue;
         builder.transactional = this.transactional;
         builder.extendLease = this.extendLease;
+        builder.batchAcknowledgements = this.batchAcknowledgements;
+        builder.ackBatchSize = this.ackBatchSize;
         builder.shutdownTimeout = this.shutdownTimeout;
         return builder;
     }
@@ -189,6 +197,15 @@ public final class ConsumerOptions {
         return this.extendLease;
     }
 
+    public boolean isBatchAcknowledgements() {
+        return this.batchAcknowledgements;
+    }
+
+    /** The configured early-flush threshold, or {@code null} to flush once per polled batch. */
+    public @Nullable Integer getAckBatchSize() {
+        return this.ackBatchSize;
+    }
+
     public Duration getShutdownTimeout() {
         return this.shutdownTimeout;
     }
@@ -202,7 +219,8 @@ public final class ConsumerOptions {
                 + ", acknowledgeMode=" + this.acknowledgeMode + ", failureAction=" + this.failureAction
                 + ", retryDelay=" + this.retryDelay + ", maxAttempts=" + this.maxAttempts
                 + ", deadLetterQueue=" + this.deadLetterQueue + ", transactional=" + this.transactional
-                + ", extendLease=" + this.extendLease + ", shutdownTimeout=" + this.shutdownTimeout + "]";
+                + ", extendLease=" + this.extendLease + ", batchAcknowledgements=" + this.batchAcknowledgements
+                + ", ackBatchSize=" + this.ackBatchSize + ", shutdownTimeout=" + this.shutdownTimeout + "]";
     }
 
     /** Builder for {@link ConsumerOptions}. */
@@ -237,6 +255,10 @@ public final class ConsumerOptions {
         private boolean transactional;
 
         private boolean extendLease;
+
+        private boolean batchAcknowledgements;
+
+        private @Nullable Integer ackBatchSize;
 
         private Duration shutdownTimeout = Duration.ofSeconds(30);
 
@@ -399,6 +421,36 @@ public final class ConsumerOptions {
         }
 
         /**
+         * Collects the acknowledgements of a polled batch and sends them as one
+         * {@code pgmq.delete} (or {@code pgmq.archive}) statement, instead of one statement per
+         * message.
+         *
+         * <p>Applies to single-message handlers, whose messages are otherwise acknowledged one by
+         * one; a batch handler is always acknowledged with one statement. Pending acknowledgements
+         * are flushed when the polled batch is done, or earlier once {@link #ackBatchSize(Integer)}
+         * are pending, and always before the next poll. Until then each message stays leased - and
+         * with {@link #extendLease(boolean)} its lease keeps being refreshed - so a crash or a
+         * failed flush redelivers it, which at-least-once handlers already tolerate.
+         *
+         * <p>Cannot be combined with {@link #transactional(boolean)}, where the acknowledgement
+         * must commit with the handler's writes, nor with {@link AcknowledgeMode#MANUAL}.
+         */
+        public Builder batchAcknowledgements(boolean value) {
+            this.batchAcknowledgements = value;
+            return this;
+        }
+
+        /**
+         * With {@link #batchAcknowledgements(boolean)}, flushes as soon as this many
+         * acknowledgements are pending rather than only at the end of the polled batch. Unset, the
+         * default, flushes once per batch. At least 1 when set.
+         */
+        public Builder ackBatchSize(@Nullable Integer value) {
+            this.ackBatchSize = value;
+            return this;
+        }
+
+        /**
          * How long {@code stop()} waits for in-flight handlers to finish. Handlers still running
          * after this are interrupted, and their messages are redelivered once their lease lapses.
          * In a Spring application keep it below {@code spring.lifecycle.timeout-per-shutdown-phase}.
@@ -442,6 +494,18 @@ public final class ConsumerOptions {
             if (this.failureAction == FailureAction.DEAD_LETTER && this.deadLetterQueue == null) {
                 throw new IllegalArgumentException(
                         "failureAction=DEAD_LETTER requires deadLetterQueue to be set");
+            }
+            if (this.ackBatchSize != null && this.ackBatchSize < 1) {
+                throw new IllegalArgumentException("ackBatchSize must be at least 1, or unset, but was "
+                        + this.ackBatchSize);
+            }
+            if (this.batchAcknowledgements && this.transactional) {
+                throw new IllegalArgumentException("batchAcknowledgements cannot be combined with transactional: "
+                        + "a transactional handler's acknowledgement must commit with its own writes");
+            }
+            if (this.batchAcknowledgements && this.acknowledgeMode == AcknowledgeMode.MANUAL) {
+                throw new IllegalArgumentException("batchAcknowledgements cannot be combined with "
+                        + "acknowledgeMode=MANUAL, where the handler acknowledges each message itself");
             }
             return new ConsumerOptions(this);
         }

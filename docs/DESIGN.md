@@ -177,6 +177,18 @@ a `ReentrantLock` rather than a monitor because a refresh holds it across a data
 on JDK 21-23 would pin a virtual thread's carrier. Each polling loop has its own refresh thread, so
 one slow refresh never delays another batch's.
 
+### Batched acknowledgements settle at the flush
+
+With `batchAcknowledgements`, a single-message handler's successful messages are collected and
+deleted (or archived) with one statement when the polled batch is done, or earlier at
+`ackBatchSize`, and always before the next poll. A pending message is settled on its lease only
+when the flush is sent, not when its handler returns: settling earlier would stop refreshing it,
+and a lease that lapsed before the flush would hand an already-handled message to another
+consumer. A failed flush is an unexpected failure like any other - nothing is touched, and the
+messages are redelivered when their lease expires. Listeners still see `onSuccess` when the
+handler returns. The option is rejected with `transactional`, where the acknowledgement must
+commit with the handler's writes, and with `MANUAL`.
+
 ### Grouped reads: never concurrent, always in order - not partition ownership
 
 `read_grouped*` withholds a whole group while one of its messages is unacknowledged, so no two

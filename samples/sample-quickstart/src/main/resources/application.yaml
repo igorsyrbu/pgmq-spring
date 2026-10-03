@@ -14,6 +14,11 @@ pgmq:
   queues:
     - name: orders
     - name: orders_dlq
+    - name: order_notifications
+  # Defaults for containers built from the ConsumerOptions bean - here the notification consumer.
+  consumer:
+    # One delete per polled batch instead of one per message. Not for transactional consumers.
+    batch-acknowledgements: true
   health:
     queues:
       - orders
