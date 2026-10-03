@@ -8,8 +8,9 @@ consumes**. No HTTP layer, no chunking, no bookkeeping. Start here.
 - Sending a message **inside the same transaction** as a business write, so the two commit or roll
   back together — the transactional outbox with no outbox table.
 - Consuming with `PgmqMessageListenerContainer`, declared as an ordinary bean.
-- Transactional processing, retries with exponential backoff, and dead-lettering after three
-  failed attempts - or at once, for an exception that is not retryable.
+- Transactional processing bounded by a transaction timeout, retries with exponential backoff,
+  and dead-lettering after three failed attempts - or at once, for an exception that is not
+  retryable.
 - A second, non-transactional consumer configured entirely from `pgmq.consumer.*`, which
   acknowledges each polled batch with one statement (`batch-acknowledgements`).
 - The health indicator and Micrometer metrics the starter contributes for free.

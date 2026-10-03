@@ -50,6 +50,9 @@ public class OrderConsumerConfiguration {
                         // The handler's write and the acknowledgement commit together, so the
                         // confirmation row and the message's removal cannot get out of step.
                         .transactional(true)
+                        // A handler stuck past 10s rolls back and is retried, instead of holding
+                        // its locks and its pooled connection; well inside the 30s lease.
+                        .transactionTimeout(Duration.ofSeconds(10))
                         .maxAttempts(3)
                         // 1s after the first failure, 2s after the second: each retry backs off
                         // further from whatever is failing, up to 10s.

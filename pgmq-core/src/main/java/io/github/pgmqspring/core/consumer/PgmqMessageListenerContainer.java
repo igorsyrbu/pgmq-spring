@@ -101,6 +101,9 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
 
     private final @Nullable TransactionTemplate transactionTemplate;
 
+    /** Runs handlers; differs from {@link #transactionTemplate} only by the handler timeout. */
+    private final @Nullable TransactionTemplate handlerTransactionTemplate;
+
     private static final ConsumerListener NO_LISTENER = new ConsumerListener() {
     };
 
@@ -144,6 +147,15 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
         this.beanName = "pgmqListener-" + this.queue;
         PlatformTransactionManager transactionManager = builder.transactionManager;
         this.transactionTemplate = transactionManager != null ? new TransactionTemplate(transactionManager) : null;
+        this.handlerTransactionTemplate = transactionManager != null
+                ? handlerTransactionTemplate(transactionManager, this.options)
+                : null;
+        Duration transactionTimeout = this.options.getTransactionTimeout();
+        if (transactionTimeout != null && transactionTimeout.compareTo(this.options.getVisibilityTimeout()) >= 0) {
+            logger.warn("Queue '" + this.queue + "' has a transactionTimeout (" + transactionTimeout
+                    + ") no shorter than its visibilityTimeout (" + this.options.getVisibilityTimeout()
+                    + "), so a message can be redelivered while its handler's transaction is still open");
+        }
         if (this.options.isTransactional() && this.transactionTemplate == null) {
             throw new IllegalArgumentException(
                     "transactional processing was requested for queue '" + this.queue
@@ -894,8 +906,19 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
         return lease;
     }
 
+    private static TransactionTemplate handlerTransactionTemplate(PlatformTransactionManager transactionManager,
+            ConsumerOptions options) {
+        TransactionTemplate template = new TransactionTemplate(transactionManager);
+        Duration timeout = options.getTransactionTimeout();
+        if (timeout != null) {
+            long seconds = timeout.getSeconds() + (timeout.getNano() > 0 ? 1 : 0);
+            template.setTimeout((int) Math.min(Integer.MAX_VALUE, seconds));
+        }
+        return template;
+    }
+
     private TransactionTemplate requireTransactionTemplate() {
-        TransactionTemplate template = this.transactionTemplate;
+        TransactionTemplate template = this.handlerTransactionTemplate;
         Assert.state(template != null, "transactional processing requires a PlatformTransactionManager");
         return template;
     }

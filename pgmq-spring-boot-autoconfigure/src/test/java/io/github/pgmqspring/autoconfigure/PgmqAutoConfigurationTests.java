@@ -189,6 +189,16 @@ class PgmqAutoConfigurationTests {
     }
 
     @Test
+    void bindsTransactionTimeout() {
+        this.runner.withPropertyValues("pgmq.consumer.transactional=true", "pgmq.consumer.transaction-timeout=20s")
+                .run((context) -> assertThat(context.getBean(ConsumerOptions.class).getTransactionTimeout())
+                        .isEqualTo(Duration.ofSeconds(20)));
+        this.runner.withPropertyValues("pgmq.consumer.transaction-timeout=20s")
+                .run((context) -> assertThat(context).hasFailed().getFailure().rootCause()
+                        .hasMessageContaining("transactionTimeout requires transactional=true"));
+    }
+
+    @Test
     void rejectsBatchAcknowledgementsWithTransactionalAtStartup() {
         this.runner.withPropertyValues(
                 "pgmq.consumer.batch-acknowledgements=true",

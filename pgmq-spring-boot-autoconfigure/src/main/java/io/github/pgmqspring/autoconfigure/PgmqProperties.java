@@ -314,6 +314,14 @@ public class PgmqProperties {
         private boolean transactional;
 
         /**
+         * Bounds each transactional handler invocation: a statement that starts after the deadline
+         * fails, the transaction rolls back and the message is retried. Enforced at statement
+         * boundaries only. Keep it shorter than visibility-timeout. Rounded up to whole seconds.
+         * Unset means no timeout. Requires transactional.
+         */
+        private @Nullable Duration transactionTimeout;
+
+        /**
          * Whether to keep extending the lease of every message in a polled batch until it is
          * settled, refreshing every third of visibility-timeout.
          */
@@ -481,6 +489,14 @@ public class PgmqProperties {
 
         public void setTransactional(boolean transactional) {
             this.transactional = transactional;
+        }
+
+        public @Nullable Duration getTransactionTimeout() {
+            return this.transactionTimeout;
+        }
+
+        public void setTransactionTimeout(@Nullable Duration transactionTimeout) {
+            this.transactionTimeout = transactionTimeout;
         }
 
         public boolean isExtendLease() {

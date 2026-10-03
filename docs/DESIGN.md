@@ -180,6 +180,17 @@ alternative is silent loss. Following from that:
   settlement, and the failure action applies.
 - **One failure never aborts its batch-mates.** Poison handling and failure actions catch and log.
 
+### Transaction timeouts are Spring's
+
+`transactionTimeout` sets the timeout of the `TransactionTemplate` that runs a transactional
+handler, and nothing else: dead-lettering keeps its own, untimed transaction. Spring enforces it
+at statement boundaries - `JdbcTemplate` fails a statement that starts after the deadline and
+gives a running one the remaining time as its query timeout - which also covers the container's
+own acknowledgement, so a handler that overran never commits. Issuing
+`SET LOCAL idle_in_transaction_session_timeout` as well was considered and rejected: it costs a
+round trip per message, terminates the whole session rather than rolling back, and needs a
+connection the container does not otherwise have.
+
 ### Leases cover the batch
 
 With `extendLease`, one lease covers every message of a polled batch from the read until each is

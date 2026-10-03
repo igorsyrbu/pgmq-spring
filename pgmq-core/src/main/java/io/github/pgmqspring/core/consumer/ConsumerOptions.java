@@ -77,6 +77,8 @@ public final class ConsumerOptions {
 
     private final boolean transactional;
 
+    private final @Nullable Duration transactionTimeout;
+
     private final boolean extendLease;
 
     private final boolean batchAcknowledgements;
@@ -104,6 +106,7 @@ public final class ConsumerOptions {
         this.nonRetryableExceptions = List.copyOf(builder.nonRetryableExceptions);
         this.deadLetterQueue = builder.deadLetterQueue;
         this.transactional = builder.transactional;
+        this.transactionTimeout = builder.transactionTimeout;
         this.extendLease = builder.extendLease;
         this.batchAcknowledgements = builder.batchAcknowledgements;
         this.ackBatchSize = builder.ackBatchSize;
@@ -143,6 +146,7 @@ public final class ConsumerOptions {
         builder.nonRetryableExceptions = this.nonRetryableExceptions;
         builder.deadLetterQueue = this.deadLetterQueue;
         builder.transactional = this.transactional;
+        builder.transactionTimeout = this.transactionTimeout;
         builder.extendLease = this.extendLease;
         builder.batchAcknowledgements = this.batchAcknowledgements;
         builder.ackBatchSize = this.ackBatchSize;
@@ -267,6 +271,10 @@ public final class ConsumerOptions {
         return this.transactional;
     }
 
+    public @Nullable Duration getTransactionTimeout() {
+        return this.transactionTimeout;
+    }
+
     public boolean isExtendLease() {
         return this.extendLease;
     }
@@ -296,6 +304,7 @@ public final class ConsumerOptions {
                 + ", maxRetryDelay=" + this.maxRetryDelay + ", maxAttempts=" + this.maxAttempts
                 + ", nonRetryableExceptions=" + this.nonRetryableExceptions.stream().map(Class::getName).toList()
                 + ", deadLetterQueue=" + this.deadLetterQueue + ", transactional=" + this.transactional
+                + ", transactionTimeout=" + this.transactionTimeout
                 + ", extendLease=" + this.extendLease + ", batchAcknowledgements=" + this.batchAcknowledgements
                 + ", ackBatchSize=" + this.ackBatchSize + ", shutdownTimeout=" + this.shutdownTimeout + "]";
     }
@@ -338,6 +347,8 @@ public final class ConsumerOptions {
         private @Nullable String deadLetterQueue;
 
         private boolean transactional;
+
+        private @Nullable Duration transactionTimeout;
 
         private boolean extendLease;
 
@@ -549,6 +560,25 @@ public final class ConsumerOptions {
         }
 
         /**
+         * Bounds each {@link #transactional(boolean) transactional} handler invocation, so a hung
+         * handler releases its locks and connection and its message is retried, instead of
+         * starving the pool.
+         *
+         * <p>Spring enforces it at statement boundaries: a statement - the handler's own, or the
+         * acknowledgement - that starts after the deadline fails, the transaction rolls back and
+         * the message counts as failed; a running statement gets the remaining time as its query
+         * timeout. Work between statements, such as a slow remote call or CPU-bound code, is not
+         * interrupted. Keep it shorter than {@link #visibilityTimeout(Duration)}, or the message
+         * can be redelivered while its transaction is still open. Rounded up to whole seconds,
+         * which is what Spring's transaction timeouts take. Unset, the default, means no timeout.
+         * Requires {@code transactional}.
+         */
+        public Builder transactionTimeout(@Nullable Duration value) {
+            this.transactionTimeout = value;
+            return this;
+        }
+
+        /**
          * Periodically extends a message's visibility timeout while its handler is still running.
          *
          * <p>Useful when handler duration varies a lot. The lease covers every message of a
@@ -655,6 +685,12 @@ public final class ConsumerOptions {
             if (this.ackBatchSize != null && this.ackBatchSize < 1) {
                 throw new IllegalArgumentException("ackBatchSize must be at least 1, or unset, but was "
                         + this.ackBatchSize);
+            }
+            if (this.transactionTimeout != null) {
+                requirePositive(this.transactionTimeout, "transactionTimeout");
+                if (!this.transactional) {
+                    throw new IllegalArgumentException("transactionTimeout requires transactional=true");
+                }
             }
             if (this.batchAcknowledgements && this.transactional) {
                 throw new IllegalArgumentException("batchAcknowledgements cannot be combined with transactional: "

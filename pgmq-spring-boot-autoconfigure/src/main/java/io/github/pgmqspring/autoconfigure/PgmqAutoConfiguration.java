@@ -100,6 +100,7 @@ public class PgmqAutoConfiguration {
                 .nonRetryableExceptions(consumer.getNonRetryableExceptions())
                 .deadLetterQueue(consumer.getDeadLetterQueue())
                 .transactional(consumer.isTransactional())
+                .transactionTimeout(consumer.getTransactionTimeout())
                 .extendLease(consumer.isExtendLease())
                 .batchAcknowledgements(consumer.isBatchAcknowledgements())
                 .ackBatchSize(consumer.getAckBatchSize())
