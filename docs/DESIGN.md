@@ -295,6 +295,21 @@ reads support long polling.
   and keeps retrying.
 - An outage logs one stack trace, then one line per further failed poll, then a recovery line.
 
+### Declared consumers are bound in two layers
+
+`pgmq.consumers.<name>` entries become container bean definitions in a
+`BeanDefinitionRegistryPostProcessor`, before any bean exists, so they are bound straight from the
+`Environment` rather than read from `PgmqProperties`. Each entry is bound twice onto one object:
+first `pgmq.consumer.*`, then the entry's own keys, so it inherits every default and overrides
+exactly what it sets, with no duplicate set of nullable "override" properties to keep in step. The
+second binding uses the exact property name Boot recorded for the entry while binding the map,
+because a name rebuilt from the map key does not match keys Boot does not hold in canonical form,
+such as `orders_v2`. The containers themselves are created with every other singleton, through
+an instance supplier, which is where the checks that need other beans run: the handler exists,
+implements a handler interface, and handles the configured payload type. A user's own
+`ConsumerOptions` bean does not apply to declared consumers - they are configured by properties,
+end to end.
+
 ### Observability without a Micrometer dependency
 
 `PgmqClientListener` (producer side) and `ConsumerListener` (consumer side) let metrics, tracing
@@ -344,7 +359,7 @@ Multi-module Gradle, Groovy DSL, a version catalog and precompiled convention pl
 | Not provided | Why |
 |---|---|
 | Topic routing (`bind_topic` / `send_topic`) | Exists from PGMQ 1.10.0, above the 1.5.0 minimum. Capability detection reports it. |
-| Annotation-driven listeners | Containers are plain beans built with a builder. |
+| Annotation-driven listeners | Containers are beans built with a builder, or declared under `pgmq.consumers`. |
 | Several named clients | `pgmq.datasource` selects one non-primary `DataSource`; more need hand-built `PgmqTemplate`s. |
 | Spring Cloud Stream | PGMQ has no broker-side fan-out or partitions, so most of the binder model would have to be rejected or emulated. |
 

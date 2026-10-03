@@ -8,6 +8,7 @@ options behind them, message headers, logging context, meters and health details
   - [Queues created on startup](#queues-created-on-startup-pgmqqueues)
   - [Producer](#producer-pgmqproducer)
   - [Consumer defaults](#consumer-defaults-pgmqconsumer)
+  - [Declared consumers](#declared-consumers-pgmqconsumersname)
   - [Health](#health-pgmqhealth)
   - [Metrics](#metrics-pgmqmetrics)
 - [How consumer properties reach a container](#how-consumer-properties-reach-a-container)
@@ -90,7 +91,8 @@ Applied to the auto-configured `PgmqTemplate`; a hand-built one has the same set
 ### Consumer defaults (`pgmq.consumer.*`)
 
 These bind to a `ConsumerOptions` bean. They are **defaults**: no container exists until your code
-builds one - see [how they reach a container](#how-consumer-properties-reach-a-container).
+builds one, or one is [declared](#declared-consumers-pgmqconsumersname) under `pgmq.consumers` -
+see [how they reach a container](#how-consumer-properties-reach-a-container).
 
 | Property | Type | Default | Description |
 |---|---|---|---|
@@ -124,6 +126,40 @@ Invalid combinations fail at startup with a message naming the property, for exa
 `failure-action=dead-letter` without `dead-letter-queue`, `poll-delay: 0`, `long-poll: 500ms`, or
 `batch-acknowledgements` together with `transactional`.
 
+### Declared consumers (`pgmq.consumers.<name>`)
+
+Each entry creates a listener container, with no code but its handler bean:
+
+```yaml
+pgmq:
+  consumer:                       # defaults for every consumer, declared or built in code
+    max-attempts: 5
+  consumers:
+    orders:
+      handler: orderHandler       # a PgmqMessageHandler<OrderPlaced> bean
+      concurrency: 8              # overrides the default for this consumer only
+      failure-action: dead-letter
+      dead-letter-queue: orders_dlq
+```
+
+Every `pgmq.consumer.*` property can be set on an entry, and overrides the default for that
+consumer; whatever the entry does not set is inherited from `pgmq.consumer.*`. A `ConsumerOptions`
+bean of your own replaces the defaults for containers built in code only: declared consumers are
+configured entirely by properties. On top of the consumer properties, an entry takes:
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `handler` | string | *required* | Name of the handler bean: a `PgmqMessageHandler`, `PgmqAcknowledgingMessageHandler` or `PgmqBatchMessageHandler`, which also chooses how messages are handed over. A missing bean, or one that is none of these, fails startup. |
+| `queue` | string | *the entry's name* | Queue to consume. Two entries consuming the same queue fail startup; raise `concurrency` instead. |
+| `payload-type` | class name | *the handler's type argument* | Class payloads are converted to. Required when the handler's type argument cannot be determined - a lambda registered without a generic type, say; a `@Bean` method's generic return type is enough. Must be assignable to the handler's type argument, or startup fails. |
+| `transaction-manager` | string | *the only one* | Name of the `PlatformTransactionManager` bean for `transactional` processing and atomic dead-lettering. Defaults to the application's only one, if there is exactly one. |
+| `auto-startup` | boolean | `true` | Whether the container starts with the application. |
+
+The container is a bean named `pgmqConsumer-<name>`, so it can be looked up to pause and resume
+it. It starts and stops with the application, and the Micrometer listener is attached to it as to
+any container bean. Invalid options fail startup with a message naming the entry, such as
+`pgmq.consumers.orders: failureAction=DEAD_LETTER requires deadLetterQueue to be set`.
+
 ### Health (`pgmq.health.*`)
 
 | Property | Type | Default | Description |
@@ -148,9 +184,9 @@ way, for example `management.metrics.distribution.percentiles.pgmq.processing.du
 
 ## How consumer properties reach a container
 
-The starter does not create containers - which queue, which payload type and which handler are
-application decisions. `pgmq.consumer.*` becomes a `ConsumerOptions` bean; pass it to the builder,
-and derive per-container variants with `toBuilder()`:
+A container is created either by [declaring it](#declared-consumers-pgmqconsumersname) under
+`pgmq.consumers`, or in code. In code, `pgmq.consumer.*` becomes a `ConsumerOptions` bean; pass it
+to the builder, and derive per-container variants with `toBuilder()`:
 
 ```java
 @Bean

@@ -73,6 +73,12 @@ public class PgmqProperties {
     /** Default settings for listener containers. */
     private final Consumer consumer = new Consumer();
 
+    /**
+     * Listener containers to create, by name. Each inherits pgmq.consumer.* and overrides what it
+     * sets, and becomes a bean named pgmqConsumer-{name}.
+     */
+    private Map<String, DeclaredConsumer> consumers = new LinkedHashMap<>();
+
     /** Health indicator settings. */
     private final Health health = new Health();
 
@@ -133,6 +139,14 @@ public class PgmqProperties {
 
     public Consumer getConsumer() {
         return this.consumer;
+    }
+
+    public Map<String, DeclaredConsumer> getConsumers() {
+        return this.consumers;
+    }
+
+    public void setConsumers(Map<String, DeclaredConsumer> consumers) {
+        this.consumers = consumers;
     }
 
     public Health getHealth() {
@@ -641,6 +655,77 @@ public class PgmqProperties {
 
         public void setShutdownTimeout(Duration shutdownTimeout) {
             this.shutdownTimeout = shutdownTimeout;
+        }
+    }
+
+    /**
+     * A listener container created from configuration, under pgmq.consumers.{name}. Every
+     * pgmq.consumer.* setting can be overridden here.
+     */
+    public static class DeclaredConsumer extends Consumer {
+
+        /** Queue to consume. Defaults to the consumer's name. */
+        private @Nullable String queue;
+
+        /**
+         * Name of the handler bean: a PgmqMessageHandler, PgmqAcknowledgingMessageHandler or
+         * PgmqBatchMessageHandler. Required.
+         */
+        private @Nullable String handler;
+
+        /**
+         * Class the payload is converted to. Defaults to the handler's type argument; required
+         * when that cannot be determined, as for a lambda bean. Must be assignable to it.
+         */
+        private @Nullable Class<?> payloadType;
+
+        /**
+         * Name of the PlatformTransactionManager bean to use, for transactional processing and
+         * atomic dead-lettering. Defaults to the only one, when there is exactly one.
+         */
+        private @Nullable String transactionManager;
+
+        /** Whether the container starts with the application context. */
+        private boolean autoStartup = true;
+
+        public @Nullable String getQueue() {
+            return this.queue;
+        }
+
+        public void setQueue(@Nullable String queue) {
+            this.queue = queue;
+        }
+
+        public @Nullable String getHandler() {
+            return this.handler;
+        }
+
+        public void setHandler(@Nullable String handler) {
+            this.handler = handler;
+        }
+
+        public @Nullable Class<?> getPayloadType() {
+            return this.payloadType;
+        }
+
+        public void setPayloadType(@Nullable Class<?> payloadType) {
+            this.payloadType = payloadType;
+        }
+
+        public @Nullable String getTransactionManager() {
+            return this.transactionManager;
+        }
+
+        public void setTransactionManager(@Nullable String transactionManager) {
+            this.transactionManager = transactionManager;
+        }
+
+        public boolean isAutoStartup() {
+            return this.autoStartup;
+        }
+
+        public void setAutoStartup(boolean autoStartup) {
+            this.autoStartup = autoStartup;
         }
     }
 

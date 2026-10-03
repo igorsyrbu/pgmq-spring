@@ -68,3 +68,5 @@ message, dead-lettering, pause/resume, and the auto-configured health indicator 
 ## Next
 
 - [`sample-quickstart-batch`](../sample-quickstart-batch) — the same, sending and consuming in batches
+- [`sample-quickstart-declarative`](../sample-quickstart-declarative) — the same consumers declared in
+  configuration, with no container code

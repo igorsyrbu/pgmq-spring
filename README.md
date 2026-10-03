@@ -385,11 +385,12 @@ because a SQL-only PGMQ installation has no `pg_extension` row to read a version
 
 ## Samples
 
-Two runnable applications, each with integration tests against a real PGMQ container.
+Three runnable applications, each with integration tests against a real PGMQ container.
 
 | Sample | What it shows |
 |---|---|
 | [`sample-quickstart`](samples/sample-quickstart) | The smallest useful app: a service that saves a row and sends a message in one transaction, and a listener container that consumes them. No HTTP layer. Start here. |
+| [`sample-quickstart-declarative`](samples/sample-quickstart-declarative) | Consumers declared in `application.yaml` under `pgmq.consumers` - handler beans and configuration, no container code. |
 | [`sample-quickstart-batch`](samples/sample-quickstart-batch) | The same in batches: `sendBatch` sends a list in one statement inside the business transaction, and a batch handler consumes up to 50 per call with one multi-row insert — including how to keep one bad message from failing its whole batch. |
 
 ```bash
@@ -398,6 +399,9 @@ Two runnable applications, each with integration tests against a real PGMQ conta
 
 # batch sending and batch consumption
 ./gradlew :samples:sample-quickstart-batch:run
+
+# consumers declared in configuration
+./gradlew :samples:sample-quickstart-declarative:run
 
 ```
 

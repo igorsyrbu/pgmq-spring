@@ -1,0 +1,52 @@
+spring:
+  application:
+    name: pgmq-quickstart-declarative-sample
+  datasource:
+    url: jdbc:postgresql://localhost:5432/postgres
+    username: postgres
+    password: postgres
+  sql:
+    init:
+      mode: always
+
+pgmq:
+  queues:
+    - name: invoices
+    - name: invoices_dlq
+    - name: audit
+
+  # Defaults every declared consumer inherits.
+  consumer:
+    max-attempts: 3
+    retry-delay: 1s
+    retry-multiplier: 2.0
+
+  # One listener container per entry - no @Bean, no builder. Each is a bean named
+  # pgmqConsumer-<name>, started with the application and instrumented like any other. The queue
+  # defaults to the entry's name, and the payload type to the handler's type argument.
+  consumers:
+    invoices:
+      handler: invoiceHandler            # a PgmqMessageHandler<InvoiceIssued> bean
+      concurrency: 2
+      transactional: true
+      transaction-timeout: 10s
+      failure-action: dead-letter
+      dead-letter-queue: invoices_dlq
+      non-retryable-exceptions:
+        - io.github.pgmqspring.samples.declarative.InvalidInvoiceException
+    audit:
+      handler: auditBatchHandler         # a PgmqBatchMessageHandler<AuditEntry> bean
+      batch-size: 20
+      max-attempts: 5                    # overrides the default of 3
+
+  health:
+    queues:
+      - invoices
+  metrics:
+    queues:
+      - invoices
+      - audit
+
+logging:
+  level:
+    io.github.pgmqspring: INFO

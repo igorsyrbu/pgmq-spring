@@ -80,3 +80,4 @@ discarding the whole batch.
 ## Next
 
 - [`sample-quickstart`](../sample-quickstart) - one message at a time
+- [`sample-quickstart-declarative`](../sample-quickstart-declarative) - consumers declared in configuration

@@ -83,7 +83,19 @@ public class PgmqAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean
     public ConsumerOptions pgmqConsumerOptions(PgmqProperties properties) {
-        PgmqProperties.Consumer consumer = properties.getConsumer();
+        return consumerOptions(properties.getConsumer());
+    }
+
+    /**
+     * Creates the containers declared under {@code pgmq.consumers}. Static, as a
+     * {@code BeanDefinitionRegistryPostProcessor} must be, so it does not instantiate this class early.
+     */
+    @Bean
+    static PgmqDeclaredConsumersRegistrar pgmqDeclaredConsumersRegistrar() {
+        return new PgmqDeclaredConsumersRegistrar();
+    }
+
+    static ConsumerOptions consumerOptions(PgmqProperties.Consumer consumer) {
         return ConsumerOptions.builder()
                 .concurrency(consumer.getConcurrency())
                 .batchSize(consumer.getBatchSize())

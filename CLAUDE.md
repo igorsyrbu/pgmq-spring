@@ -46,7 +46,8 @@ check Gradle's exit code.
   `PgmqInitializer` (extension creation, version check, queue creation at startup), health and metrics
   auto-configuration. Every bean is `@ConditionalOnMissingBean`.
 - `pgmq-spring-boot-starter` — no code, only dependencies.
-- `samples/` — `sample-quickstart` (one message at a time) and `sample-quickstart-batch` (batch send
+- `samples/` — `sample-quickstart` (one message at a time), `sample-quickstart-declarative`
+  (consumers declared under `pgmq.consumers`) and `sample-quickstart-batch` (batch send
   and batch handler). Samples are never published.
 - `build-logic/` — precompiled convention plugins: `pgmq.java-conventions`, `pgmq.library-conventions`
   (publishing), `pgmq.sample-conventions`.
@@ -71,7 +72,8 @@ no outbox table. Rules the SQL follows, each for a reason recorded in `docs/DESI
 
 **Consumer runtime.** `PgmqMessageListenerContainer` is a `SmartLifecycle` bean built with a builder
 from `ConsumerOptions` (Boot binds `pgmq.consumer.*` into a defaults bean; `toBuilder()` derives
-per-container options). `concurrency` poll loops (virtual threads on JDK 21+, via reflective
+per-container options), or declared under `pgmq.consumers.<name>`, which
+`PgmqDeclaredConsumersRegistrar` turns into `pgmqConsumer-<name>` beans. `concurrency` poll loops (virtual threads on JDK 21+, via reflective
 `VirtualThreads`) read a batch, convert each message, and dispatch to a single, acknowledging or batch
 handler. Invariants to preserve when changing it:
 - On any unexpected failure the container touches nothing and lets the visibility timeout redeliver.
