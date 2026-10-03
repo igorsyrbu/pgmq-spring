@@ -149,6 +149,24 @@ class PgmqAutoConfigurationTests {
     }
 
     @Test
+    void bindsRetryBackoffProperties() {
+        this.runner.withPropertyValues(
+                "pgmq.consumer.retry-delay=2s",
+                "pgmq.consumer.retry-multiplier=2.5",
+                "pgmq.consumer.max-retry-delay=5m").run((context) -> {
+                    ConsumerOptions options = context.getBean(ConsumerOptions.class);
+                    assertThat(options.getRetryMultiplier()).isEqualTo(2.5);
+                    assertThat(options.getMaxRetryDelay()).isEqualTo(Duration.ofMinutes(5));
+                    assertThat(options.retryDelayAfter(2)).isEqualTo(Duration.ofSeconds(5));
+                });
+        this.runner.run((context) -> {
+            ConsumerOptions options = context.getBean(ConsumerOptions.class);
+            assertThat(options.getRetryMultiplier()).isEqualTo(1.0);
+            assertThat(options.getMaxRetryDelay()).isNull();
+        });
+    }
+
+    @Test
     void rejectsBatchAcknowledgementsWithTransactionalAtStartup() {
         this.runner.withPropertyValues(
                 "pgmq.consumer.batch-acknowledgements=true",

@@ -797,7 +797,7 @@ public class PgmqMessageListenerContainer<T> implements SmartLifecycle, AutoClos
         boolean exhausted = message.readCount() >= this.options.getMaxAttempts();
         try {
             if (!exhausted) {
-                Duration delay = this.options.getRetryDelay();
+                Duration delay = this.options.retryDelayAfter(message.readCount());
                 if (!delay.isZero() && !delay.isNegative()) {
                     this.pgmq.setVisibilityTimeout(this.queue, message.id(), delay);
                 }

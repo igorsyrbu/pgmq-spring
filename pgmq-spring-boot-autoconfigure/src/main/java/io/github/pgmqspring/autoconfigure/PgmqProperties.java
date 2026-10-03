@@ -268,6 +268,19 @@ public class PgmqProperties {
         private Duration retryDelay = Duration.ofSeconds(5);
 
         /**
+         * Factor the retry delay grows by with every failed attempt: the delay after the n-th
+         * delivery is retry-delay × retry-multiplier^(n - 1), capped at max-retry-delay. Based on
+         * PGMQ's read_ct, so it survives restarts. 1.0 keeps the delay fixed. At least 1.0.
+         */
+        private double retryMultiplier = 1.0;
+
+        /**
+         * Upper bound for the retry delay grown by retry-multiplier. Unset leaves it uncapped.
+         * Must not be shorter than retry-delay.
+         */
+        private @Nullable Duration maxRetryDelay;
+
+        /**
          * Delivery attempts before a message is treated as poison, compared against PGMQ's read_ct
          * so the count survives restarts and is shared by every instance. At least 1.
          */
@@ -398,6 +411,22 @@ public class PgmqProperties {
 
         public void setRetryDelay(Duration retryDelay) {
             this.retryDelay = retryDelay;
+        }
+
+        public double getRetryMultiplier() {
+            return this.retryMultiplier;
+        }
+
+        public void setRetryMultiplier(double retryMultiplier) {
+            this.retryMultiplier = retryMultiplier;
+        }
+
+        public @Nullable Duration getMaxRetryDelay() {
+            return this.maxRetryDelay;
+        }
+
+        public void setMaxRetryDelay(@Nullable Duration maxRetryDelay) {
+            this.maxRetryDelay = maxRetryDelay;
         }
 
         public int getMaxAttempts() {

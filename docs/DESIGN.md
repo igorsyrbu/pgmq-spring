@@ -150,6 +150,16 @@ A failed message is retried until `read_ct` reaches `maxAttempts`; only then is 
 `REDELIVER` names no terminal state, so an exhausted or poisoned message under it is archived with
 an error log rather than looping for ever.
 
+### Retry backoff comes from `read_ct`
+
+With `retryMultiplier`, the delay after a failed delivery is
+`retryDelay × retryMultiplier^(read_ct - 1)`, capped at `maxRetryDelay`. Deriving the exponent
+from `read_ct` rather than from a counter in the consumer makes the backoff survive restarts and
+agree across instances, with no bookkeeping. The arithmetic is done in floating point and
+saturates at PGMQ's largest visibility timeout, because `Duration.multipliedBy` would throw on
+overflow. An unset `maxRetryDelay` means uncapped: retries only happen while
+`read_ct < maxAttempts`, so the attempt limit already bounds the largest delay.
+
 ### The container never guesses
 
 On an unexpected failure - a database error, a listener callback throwing, a failed settlement -

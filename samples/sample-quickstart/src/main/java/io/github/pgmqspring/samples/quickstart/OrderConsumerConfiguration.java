@@ -51,7 +51,11 @@ public class OrderConsumerConfiguration {
                         // confirmation row and the message's removal cannot get out of step.
                         .transactional(true)
                         .maxAttempts(3)
+                        // 1s after the first failure, 2s after the second: each retry backs off
+                        // further from whatever is failing, up to 10s.
                         .retryDelay(Duration.ofSeconds(1))
+                        .retryMultiplier(2.0)
+                        .maxRetryDelay(Duration.ofSeconds(10))
                         .failureAction(FailureAction.DEAD_LETTER)
                         .deadLetterQueue("orders_dlq")
                         .build())

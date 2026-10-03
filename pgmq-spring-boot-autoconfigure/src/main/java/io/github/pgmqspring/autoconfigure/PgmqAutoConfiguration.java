@@ -93,6 +93,8 @@ public class PgmqAutoConfiguration {
                 .groupStrategy(consumer.getGroupStrategy())
                 .failureAction(consumer.getFailureAction())
                 .retryDelay(consumer.getRetryDelay())
+                .retryMultiplier(consumer.getRetryMultiplier())
+                .maxRetryDelay(consumer.getMaxRetryDelay())
                 .maxAttempts(consumer.getMaxAttempts())
                 .deadLetterQueue(consumer.getDeadLetterQueue())
                 .transactional(consumer.isTransactional())

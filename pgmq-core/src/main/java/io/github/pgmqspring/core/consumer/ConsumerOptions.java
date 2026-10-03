@@ -32,6 +32,9 @@ import io.github.pgmqspring.core.client.GroupReadStrategy;
  */
 public final class ConsumerOptions {
 
+    /** PGMQ takes visibility timeouts as an {@code integer} of seconds; longer delays saturate there. */
+    private static final Duration LONGEST_RETRY_DELAY = Duration.ofSeconds(Integer.MAX_VALUE);
+
     private final int concurrency;
 
     private final int batchSize;
@@ -53,6 +56,10 @@ public final class ConsumerOptions {
     private final FailureAction failureAction;
 
     private final Duration retryDelay;
+
+    private final double retryMultiplier;
+
+    private final @Nullable Duration maxRetryDelay;
 
     private final int maxAttempts;
 
@@ -80,6 +87,8 @@ public final class ConsumerOptions {
         this.acknowledgeMode = builder.acknowledgeMode;
         this.failureAction = builder.failureAction;
         this.retryDelay = builder.retryDelay;
+        this.retryMultiplier = builder.retryMultiplier;
+        this.maxRetryDelay = builder.maxRetryDelay;
         this.maxAttempts = builder.maxAttempts;
         this.deadLetterQueue = builder.deadLetterQueue;
         this.transactional = builder.transactional;
@@ -115,6 +124,8 @@ public final class ConsumerOptions {
         builder.acknowledgeMode = this.acknowledgeMode;
         builder.failureAction = this.failureAction;
         builder.retryDelay = this.retryDelay;
+        builder.retryMultiplier = this.retryMultiplier;
+        builder.maxRetryDelay = this.maxRetryDelay;
         builder.maxAttempts = this.maxAttempts;
         builder.deadLetterQueue = this.deadLetterQueue;
         builder.transactional = this.transactional;
@@ -181,6 +192,31 @@ public final class ConsumerOptions {
         return this.retryDelay;
     }
 
+    public double getRetryMultiplier() {
+        return this.retryMultiplier;
+    }
+
+    public @Nullable Duration getMaxRetryDelay() {
+        return this.maxRetryDelay;
+    }
+
+    /**
+     * The backoff before a message that failed on its {@code readCount}-th delivery becomes
+     * visible again: {@code retryDelay × retryMultiplier^(readCount - 1)}, capped at
+     * {@code maxRetryDelay}. Saturates instead of overflowing.
+     */
+    public Duration retryDelayAfter(int readCount) {
+        Duration ceiling = this.maxRetryDelay != null ? this.maxRetryDelay : LONGEST_RETRY_DELAY;
+        if (this.retryDelay.isZero() || this.retryMultiplier == 1.0) {
+            return this.retryDelay;
+        }
+        double millis = this.retryDelay.toMillis() * Math.pow(this.retryMultiplier, Math.max(0, readCount - 1));
+        if (!Double.isFinite(millis) || millis >= ceiling.toMillis()) {
+            return ceiling;
+        }
+        return Duration.ofMillis((long) Math.ceil(millis));
+    }
+
     public int getMaxAttempts() {
         return this.maxAttempts;
     }
@@ -217,7 +253,8 @@ public final class ConsumerOptions {
                 + ", maxPollDelay=" + this.maxPollDelay + ", longPoll=" + this.longPoll
                 + ", groupOrdered=" + this.groupOrdered + ", groupStrategy=" + this.groupStrategy
                 + ", acknowledgeMode=" + this.acknowledgeMode + ", failureAction=" + this.failureAction
-                + ", retryDelay=" + this.retryDelay + ", maxAttempts=" + this.maxAttempts
+                + ", retryDelay=" + this.retryDelay + ", retryMultiplier=" + this.retryMultiplier
+                + ", maxRetryDelay=" + this.maxRetryDelay + ", maxAttempts=" + this.maxAttempts
                 + ", deadLetterQueue=" + this.deadLetterQueue + ", transactional=" + this.transactional
                 + ", extendLease=" + this.extendLease + ", batchAcknowledgements=" + this.batchAcknowledgements
                 + ", ackBatchSize=" + this.ackBatchSize + ", shutdownTimeout=" + this.shutdownTimeout + "]";
@@ -247,6 +284,10 @@ public final class ConsumerOptions {
         private FailureAction failureAction = FailureAction.REDELIVER;
 
         private Duration retryDelay = Duration.ofSeconds(5);
+
+        private double retryMultiplier = 1.0;
+
+        private @Nullable Duration maxRetryDelay;
 
         private int maxAttempts = 5;
 
@@ -378,6 +419,27 @@ public final class ConsumerOptions {
         }
 
         /**
+         * Grows {@link #retryDelay(Duration)} with every failed attempt: the delay after the
+         * {@code n}-th delivery is {@code retryDelay × retryMultiplier^(n - 1)}, capped at
+         * {@link #maxRetryDelay(Duration)}. The attempt number is PGMQ's {@code read_ct}, so the
+         * backoff survives restarts and is the same on every instance. The default {@code 1.0}
+         * keeps the delay fixed. At least {@code 1.0}.
+         */
+        public Builder retryMultiplier(double value) {
+            this.retryMultiplier = value;
+            return this;
+        }
+
+        /**
+         * Upper bound for a delay grown by {@link #retryMultiplier(double)}. Unset, the default,
+         * leaves it uncapped. Must not be shorter than {@link #retryDelay(Duration)}.
+         */
+        public Builder maxRetryDelay(@Nullable Duration value) {
+            this.maxRetryDelay = value;
+            return this;
+        }
+
+        /**
          * How many delivery attempts a message gets before it is treated as poison.
          *
          * <p>Compared against PGMQ's {@code read_ct}, which the database increments on every read.
@@ -475,6 +537,14 @@ public final class ConsumerOptions {
                 throw new IllegalArgumentException("longPoll must be at least 1s, or unset, but was " + this.longPoll);
             }
             requireNonNegative(this.retryDelay, "retryDelay");
+            if (!(this.retryMultiplier >= 1.0) || Double.isInfinite(this.retryMultiplier)) {
+                throw new IllegalArgumentException("retryMultiplier must be a finite number of at least 1.0, but was "
+                        + this.retryMultiplier);
+            }
+            if (this.maxRetryDelay != null && this.maxRetryDelay.compareTo(this.retryDelay) < 0) {
+                throw new IllegalArgumentException("maxRetryDelay (" + this.maxRetryDelay
+                        + ") must not be shorter than retryDelay (" + this.retryDelay + ")");
+            }
             requireNonNegative(this.shutdownTimeout, "shutdownTimeout");
             if (this.groupStrategy == null || this.acknowledgeMode == null || this.failureAction == null) {
                 throw new IllegalArgumentException("groupStrategy, acknowledgeMode and failureAction must not be null");
