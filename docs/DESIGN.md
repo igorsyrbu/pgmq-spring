@@ -103,6 +103,19 @@ Queue names are limited to **47** characters (`template_pgmq_q_` is 16, and 16 +
 PGMQ - so `Orders` and `orders` are the same queue. `QueueNames` mirrors these rules and exposes
 `normalize()` to detect such collisions.
 
+### Chunked batches stay atomic
+
+With `maxBatchSize`, a long batch becomes several `send_batch` statements. A single statement is
+all-or-nothing, and splitting it must not quietly change that: a failure in the third chunk after
+two committed ones would leave the caller with an exception, no ids, and messages it cannot
+identify to resend or clean up. So the chunks join the transaction bound to the client's
+`DataSource` when there is one, and otherwise run in a transaction the client opens with a
+`DataSourceTransactionManager` of its own. Whether a transaction is bound is decided by
+`TransactionSynchronizationManager.hasResource(dataSource)`, not by "is any transaction active":
+a transaction on another data source, or a JPA transaction manager that exposes a connection
+without marking it active, must not make the client either skip its own transaction or try to
+start a nested one on an already-bound connection.
+
 ### Whole seconds
 
 Visibility timeouts, delays and long-poll windows are `integer` seconds. The client rounds **up**

@@ -103,6 +103,22 @@ class BatchQuickstartIntegrationTests {
     }
 
     @Test
+    void aBatchLongerThanTheMaximumIsSentInSeveralStatements() {
+        double statementsBefore = sendStatements();
+
+        List<Reading> readings = new ArrayList<>();
+        for (int i = 0; i < 1200; i++) {
+            readings.add(new Reading("large-" + i, "sensor-" + (i % 3), 21.5));
+        }
+
+        List<Long> ids = this.readingService.ingest("ingest-large", readings);
+
+        assertThat(ids).hasSize(1200).isSorted();
+        assertThat(sendStatements() - statementsBefore).as("pgmq.producer.max-batch-size=500").isEqualTo(3);
+        await().atMost(Duration.ofSeconds(60)).until(() -> count("readings", "large") == 1200);
+    }
+
+    @Test
     void anInvalidReadingIsRejectedWithoutFailingItsBatchMates() {
         List<Reading> readings = readings("mixed", 10);
         readings.set(3, new Reading("mixed-bad", "sensor-0", 9999));

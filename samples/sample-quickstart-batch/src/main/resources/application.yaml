@@ -14,6 +14,9 @@ pgmq:
   queues:
     - name: readings
     - name: readings_dlq
+  producer:
+    # A sendBatch longer than this becomes several statements - still all-or-nothing.
+    max-batch-size: 500
   health:
     queues:
       - readings

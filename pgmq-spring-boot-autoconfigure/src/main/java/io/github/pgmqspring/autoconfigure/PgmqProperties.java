@@ -63,6 +63,9 @@ public class PgmqProperties {
     /** Queues to create on startup if they do not already exist. */
     private List<Queue> queues = new ArrayList<>();
 
+    /** Settings for sending. */
+    private final Producer producer = new Producer();
+
     /** Default settings for listener containers. */
     private final Consumer consumer = new Consumer();
 
@@ -118,6 +121,10 @@ public class PgmqProperties {
 
     public void setQueues(List<Queue> queues) {
         this.queues = queues;
+    }
+
+    public Producer getProducer() {
+        return this.producer;
     }
 
     public Consumer getConsumer() {
@@ -192,6 +199,26 @@ public class PgmqProperties {
 
         public void setFifoIndex(boolean fifoIndex) {
             this.fifoIndex = fifoIndex;
+        }
+    }
+
+    /** Settings applied to the PGMQ client when sending. */
+    public static class Producer {
+
+        /**
+         * Most messages per send_batch statement. Longer sendBatch, sendRawBatch and sendMessages
+         * lists are split into several statements, which stay atomic: they join the caller's
+         * transaction, or run in one of their own. Unset sends every batch as one statement. At
+         * least 1 when set.
+         */
+        private @Nullable Integer maxBatchSize;
+
+        public @Nullable Integer getMaxBatchSize() {
+            return this.maxBatchSize;
+        }
+
+        public void setMaxBatchSize(@Nullable Integer maxBatchSize) {
+            this.maxBatchSize = maxBatchSize;
         }
     }
 

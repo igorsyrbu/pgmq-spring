@@ -6,7 +6,9 @@ The quickstart in batches: **many messages per send, many messages per handler c
 ## What it shows
 
 - **Batch sending.** `sendBatch` writes a whole list of messages in **one statement**, inside the
-  same transaction as the business write. All of them commit, or none do.
+  same transaction as the business write. All of them commit, or none do. A list longer than
+  `pgmq.producer.max-batch-size` (500 here) is split into several statements, still in that one
+  transaction.
 - **Batch consumption.** A container with `batchHandler(...)` and `batchSize(50)` hands up to 50
   messages to one call, which writes them with one multi-row insert. The insert and the
   acknowledgement (one delete for every id) commit together.
@@ -47,7 +49,7 @@ Pass `--args='--sample.demo.enabled=false'` to start it without the demo data.
 | [`ReadingService`](src/main/java/io/github/pgmqspring/samples/batch/ReadingService.java) | `@Transactional` - the ingestion row and `sendBatch` are one Postgres transaction |
 | [`ReadingBatchHandler`](src/main/java/io/github/pgmqspring/samples/batch/ReadingBatchHandler.java) | One call per batch; idempotent multi-row insert; rejects instead of throwing |
 | [`ReadingConsumerConfiguration`](src/main/java/io/github/pgmqspring/samples/batch/ReadingConsumerConfiguration.java) | `batchHandler(...)` and `batchSize(50)` - the only differences from the single-message container |
-| [`application.yaml`](src/main/resources/application.yaml) | A datasource and two queue names |
+| [`application.yaml`](src/main/resources/application.yaml) | A datasource, two queue names and the largest batch per statement |
 
 ## Variations
 
@@ -66,8 +68,8 @@ pgmq.sendMessages(ReadingService.QUEUE, readings.stream()
 ./gradlew :samples:sample-quickstart-batch:test
 ```
 
-Four integration tests against a real PGMQ container: 200 readings sent in one statement and
-consumed in batches; an invalid reading rejected without failing its batch; a transient failure
+Five integration tests against a real PGMQ container: 200 readings sent in one statement and
+consumed in batches; 1,200 readings sent in three statements of at most 500; an invalid reading rejected without failing its batch; a transient failure
 retrying the whole batch while storing every reading once; and a rollback after the send
 discarding the whole batch.
 

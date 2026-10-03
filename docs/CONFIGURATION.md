@@ -6,6 +6,7 @@ options behind them, message headers, logging context, meters and health details
 - [Spring Boot properties](#spring-boot-properties)
   - [General](#general-pgmq)
   - [Queues created on startup](#queues-created-on-startup-pgmqqueues)
+  - [Producer](#producer-pgmqproducer)
   - [Consumer defaults](#consumer-defaults-pgmqconsumer)
   - [Health](#health-pgmqhealth)
   - [Metrics](#metrics-pgmqmetrics)
@@ -72,6 +73,14 @@ pgmq:
 Creation is idempotent, so the list is safe to apply on every start. An existing queue is left
 alone - changing `kind` does not convert it. When several instances start together, a failed
 creation is re-checked and ignored if the queue now exists.
+
+### Producer (`pgmq.producer.*`)
+
+Applied to the auto-configured `PgmqTemplate`; a hand-built one has the same setters.
+
+| Property | Type | Default | Setter | Description |
+|---|---|---|---|---|
+| `pgmq.producer.max-batch-size` | int | *unset* | `setMaxBatchSize(Integer)` | Most messages per `send_batch` statement. A longer `sendBatch`, `sendRawBatch` or `sendMessages` list is split into several statements, bounding the size of each statement's JSON parameter and the work one statement does. The chunks of a call stay **atomic**: they join the caller's transaction when one is bound to the client's `DataSource`, and otherwise run in a transaction of their own. Ids come back in input order, and `pgmq.send.duration` records one sample per statement. Unset sends every batch as one statement. At least 1 when set. |
 
 ### Consumer defaults (`pgmq.consumer.*`)
 
@@ -212,7 +221,8 @@ converted - after PGMQ has already leased the batch. For untrusted producers rea
 | `deliverAt(Instant)` | Invisible until this instant, independent of the JVM time zone. Clears `delay`. |
 
 `sendBatch` and `sendRawBatch` apply one `SendOptions` - headers included - to every message.
-For headers that differ per message, use `sendMessages`.
+For headers that differ per message, use `sendMessages`. Every batch send is one statement unless
+it is longer than [`pgmq.producer.max-batch-size`](#producer-pgmqproducer).
 
 ## Batches with per-message headers
 

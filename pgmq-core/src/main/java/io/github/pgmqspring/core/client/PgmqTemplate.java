@@ -32,6 +32,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 import javax.sql.DataSource;
@@ -42,6 +43,9 @@ import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.jdbc.BadSqlGrammarException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.Assert;
 
 import io.github.pgmqspring.core.InvalidQueueNameException;
@@ -209,6 +213,8 @@ public class PgmqTemplate implements PgmqOperations {
     private volatile PgmqClientListener clientListener = new PgmqClientListener() {
     };
 
+    private volatile @Nullable Integer maxBatchSize;
+
     /**
      * Creates a template on the given {@link DataSource}.
      *
@@ -250,6 +256,28 @@ public class PgmqTemplate implements PgmqOperations {
      */
     public void setClientListener(PgmqClientListener clientListener) {
         this.clientListener = clientListener;
+    }
+
+    /**
+     * Splits batch sends ({@code sendBatch}, {@code sendRawBatch}, {@code sendMessages}) longer
+     * than this into several {@code send_batch} statements, which bounds the size of each
+     * statement's JSON parameter and the work a single statement does.
+     *
+     * <p>The chunks of one call stay atomic: they join the caller's transaction when one is bound
+     * to this template's {@code DataSource}, and otherwise run in a transaction of their own. Ids
+     * come back in input order. {@code null}, the default, sends every batch as one statement.
+     *
+     * @param maxBatchSize the most messages per statement, at least 1, or {@code null}
+     */
+    public void setMaxBatchSize(@Nullable Integer maxBatchSize) {
+        Assert.isTrue(maxBatchSize == null || maxBatchSize >= 1,
+                () -> "maxBatchSize must be at least 1, or null, but was " + maxBatchSize);
+        this.maxBatchSize = maxBatchSize;
+    }
+
+    /** The most messages sent per statement, or {@code null} when batches are never split. */
+    public @Nullable Integer getMaxBatchSize() {
+        return this.maxBatchSize;
     }
 
     // ---------------------------------------------------------------------
@@ -412,12 +440,12 @@ public class PgmqTemplate implements PgmqOperations {
         }
         jsonPayloads.forEach((json) -> Assert.hasText(json, "json payloads must not be empty"));
         // PGMQ requires the headers array to be either null or the same length as the payloads.
-        String headerArray = null;
+        List<String> headers = null;
         if (options.hasHeaders()) {
             String single = this.payloadConverter.toJson(options.getHeaders());
-            headerArray = jsonArrayOf(jsonPayloads.stream().map((ignored) -> single).toList());
+            headers = jsonPayloads.stream().map((ignored) -> single).toList();
         }
-        return sendBatchStatement(queue, jsonStringArrayOf(jsonPayloads), headerArray, options);
+        return sendBatchStatements(queue, jsonPayloads, headers, options);
     }
 
     @Override
@@ -452,8 +480,40 @@ public class PgmqTemplate implements PgmqOperations {
                 anyHeaders = true;
             }
         }
-        return sendBatchStatement(queue, jsonStringArrayOf(payloads), anyHeaders ? jsonArrayOf(headers) : null,
-                options);
+        return sendBatchStatements(queue, payloads, anyHeaders ? headers : null, options);
+    }
+
+    private List<Long> sendBatchStatements(String queue, List<String> payloads, @Nullable List<String> headers,
+            SendOptions options) {
+        Integer chunkSize = this.maxBatchSize;
+        if (chunkSize == null || payloads.size() <= chunkSize) {
+            return sendBatchStatement(queue, jsonStringArrayOf(payloads), headers != null ? jsonArrayOf(headers) : null,
+                    options);
+        }
+        return inOneTransaction(() -> {
+            List<Long> ids = new ArrayList<>(payloads.size());
+            for (int from = 0; from < payloads.size(); from += chunkSize) {
+                int to = Math.min(from + chunkSize, payloads.size());
+                ids.addAll(sendBatchStatement(queue, jsonStringArrayOf(payloads.subList(from, to)),
+                        headers != null ? jsonArrayOf(headers.subList(from, to)) : null, options));
+            }
+            return ids;
+        });
+    }
+
+    /**
+     * Runs {@code statements} in the transaction bound to this template's {@code DataSource}, or in a
+     * new one when none is, so that several statements are as atomic as one would have been.
+     */
+    private <T> T inOneTransaction(Supplier<T> statements) {
+        DataSource dataSource = this.jdbcTemplate.getDataSource();
+        if (dataSource == null || TransactionSynchronizationManager.hasResource(dataSource)) {
+            return statements.get();
+        }
+        T result = new TransactionTemplate(new DataSourceTransactionManager(dataSource))
+                .execute((status) -> statements.get());
+        Assert.state(result != null, "the statements returned no result");
+        return result;
     }
 
     private List<Long> sendBatchStatement(String queue, String payloadArray, @Nullable String headerArray,

@@ -199,6 +199,13 @@ class PgmqAutoConfigurationTests {
     }
 
     @Test
+    void appliesTheProducerMaxBatchSize() {
+        this.runner.withPropertyValues("pgmq.producer.max-batch-size=500").run((context) -> assertThat(
+                context.getBean(PgmqTemplate.class).getMaxBatchSize()).isEqualTo(500));
+        this.runner.run((context) -> assertThat(context.getBean(PgmqTemplate.class).getMaxBatchSize()).isNull());
+    }
+
+    @Test
     void rejectsBatchAcknowledgementsWithTransactionalAtStartup() {
         this.runner.withPropertyValues(
                 "pgmq.consumer.batch-acknowledgements=true",

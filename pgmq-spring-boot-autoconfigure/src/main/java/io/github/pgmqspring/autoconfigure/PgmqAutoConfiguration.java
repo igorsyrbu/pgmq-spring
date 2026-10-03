@@ -73,7 +73,9 @@ public class PgmqAutoConfiguration {
     public PgmqTemplate pgmqTemplate(PgmqProperties properties, PayloadConverter payloadConverter,
             BeanFactory beanFactory) {
         DataSource dataSource = resolveDataSource(properties, beanFactory);
-        return new PgmqTemplate(new JdbcTemplate(dataSource), payloadConverter);
+        PgmqTemplate template = new PgmqTemplate(new JdbcTemplate(dataSource), payloadConverter);
+        template.setMaxBatchSize(properties.getProducer().getMaxBatchSize());
+        return template;
     }
 
     /** Defaults for listener containers, taken from {@code pgmq.consumer.*}. */
